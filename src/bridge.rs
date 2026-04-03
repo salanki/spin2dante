@@ -460,7 +460,7 @@ impl SendspinBridge {
         }
     }
 
-    fn log_metrics(&self) {
+    fn log_metrics(&mut self) {
         if self.state == BridgeState::Running {
             if let Some(rb) = &self.ring_buffer {
                 self.metrics.log(rb.write_pos, rb.read_pos());

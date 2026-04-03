@@ -1,4 +1,4 @@
-use log::info;
+use log::{info, warn};
 use std::time::Instant;
 
 /// Tracks jitter buffer health metrics for console logging.
@@ -10,7 +10,12 @@ pub struct BufferMetrics {
     overruns: u64,
     /// Recent (timestamp, fill_level) pairs for drift estimation.
     fill_history: Vec<(Instant, isize)>,
-    last_report: Instant,
+    /// Tracks whether a DANTE subscriber is actively consuming audio.
+    last_read_pos: usize,
+    /// How many consecutive log intervals read_pos has been stalled.
+    stalled_intervals: u32,
+    /// Whether we've logged a "subscriber active" recovery message.
+    was_stalled: bool,
 }
 
 impl BufferMetrics {
@@ -22,7 +27,9 @@ impl BufferMetrics {
             underruns: 0,
             overruns: 0,
             fill_history: Vec::new(),
-            last_report: Instant::now(),
+            last_read_pos: 0,
+            stalled_intervals: 0,
+            was_stalled: false,
         }
     }
 
@@ -32,7 +39,8 @@ impl BufferMetrics {
         self.underruns = 0;
         self.overruns = 0;
         self.fill_history.clear();
-        self.last_report = Instant::now();
+        self.stalled_intervals = 0;
+        self.was_stalled = false;
     }
 
     /// Called on each audio write with current write and read positions.
@@ -61,8 +69,32 @@ impl BufferMetrics {
     }
 
     /// Log metrics to stderr. Called periodically.
-    pub fn log(&self, write_pos: usize, read_pos: usize) {
+    pub fn log(&mut self, write_pos: usize, read_pos: usize) {
         let fill = (write_pos as isize).wrapping_sub(read_pos as isize);
+
+        // Detect whether read_pos is advancing (subscriber active)
+        let read_advancing = read_pos != self.last_read_pos;
+        self.last_read_pos = read_pos;
+
+        if !read_advancing {
+            self.stalled_intervals += 1;
+            if self.stalled_intervals >= 2 {
+                self.was_stalled = true;
+                warn!(
+                    "[buffer] no active DANTE subscriber; audio buffered but not being consumed \
+                     (fill={}, write_pos={})",
+                    fill, write_pos
+                );
+                return;
+            }
+        } else {
+            if self.was_stalled {
+                info!("[buffer] subscriber active; consumption resumed");
+                self.was_stalled = false;
+            }
+            self.stalled_intervals = 0;
+        }
+
         let drift_ppm = self.estimate_drift_ppm();
 
         let drift_str = match drift_ppm {
@@ -107,9 +139,9 @@ impl BufferMetrics {
         }
 
         let fill_change = (last.1 - first.1) as f64;
-        // Drift in samples/second, convert to ppm (parts per million of 48kHz)
         let drift_samples_per_sec = fill_change / elapsed_secs;
-        let drift_ppm = (drift_samples_per_sec / super::bridge::SAMPLE_RATE as f64) * 1_000_000.0;
+        let drift_ppm =
+            (drift_samples_per_sec / super::bridge::SAMPLE_RATE as f64) * 1_000_000.0;
 
         Some(drift_ppm)
     }
