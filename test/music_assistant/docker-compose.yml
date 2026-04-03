@@ -1,6 +1,6 @@
 services:
   music_assistant:
-    image: ghcr.io/music-assistant/server:latest
+    image: ${MUSIC_ASSISTANT_IMAGE:-ghcr.io/music-assistant/server:latest}
     container_name: music-assistant-test
     network_mode: host
     restart: unless-stopped
@@ -9,4 +9,3 @@ services:
     volumes:
       - ./data:/data
       - ./media:/media:ro
-

@@ -44,7 +44,11 @@ Notes:
 - The first start may take a bit while the image is pulled and the server initializes.
 - If you want MA to see local test files, place them under `test/music_assistant/media/`
   and add that folder as a local filesystem provider from the MA UI.
-- This setup uses the official container image `ghcr.io/music-assistant/server:latest`.
+- By default, the compose file uses the official published image
+  `ghcr.io/music-assistant/server:latest`.
+- The helper scripts intentionally use a clean temporary Docker config at
+  `/tmp/music-assistant-docker-config`. This avoids stale `ghcr.io` credentials
+  in `~/.docker/config.json` causing GHCR pulls to fail.
 
 ## Quick Start
 
