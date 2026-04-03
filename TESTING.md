@@ -12,25 +12,54 @@ All testing runs in Docker containers — no local Rust toolchain, ALSA, or PTP 
   └── sendspin-bridge/  # this repo
   ```
 
+## Music Assistant Test Server
+
+For manual bridge testing against a real Music Assistant instance, a standalone
+Docker setup is provided in `test/music_assistant/`.
+
+Why this setup:
+- Runs entirely in Docker, with no host package installs
+- Uses `network_mode: host`, which is the simplest option for player discovery
+- Keeps persistent MA state in `test/music_assistant/data/`
+- Optionally mounts `test/music_assistant/media/` read-only at `/media`
+
+Start it:
+```sh
+cd test/music_assistant
+./run.sh
+```
+
+Stop it:
+```sh
+cd test/music_assistant
+./stop.sh
+```
+
+Then open Music Assistant at:
+```text
+http://localhost:8095
+```
+
+Notes:
+- The first start may take a bit while the image is pulled and the server initializes.
+- If you want MA to see local test files, place them under `test/music_assistant/media/`
+  and add that folder as a local filesystem provider from the MA UI.
+- This setup uses the official container image `ghcr.io/music-assistant/server:latest`.
+
 ## Quick Start
 
 ```sh
-# 1. Build inferno2pipe image (only needed once, or after inferno updates)
-cd ../inferno
-git submodule update --init --recursive
-docker build -f Dockerfile.alpine-i2pipe -t inferno_aoip:alpine-i2pipe .
+# Single-stream E2E test (1 bridge, 1 receiver)
+make test
 
-# 2. Run the E2E test
-cd ../sendspin-bridge/test
-docker compose down --remove-orphans 2>/dev/null
-docker compose up --build
+# Multi-stream E2E test (16 bridges in one Sendspin group, 16 receivers)
+make test-multi
+
+# Override inferno location if needed
+make test INFERNO_DIR=/path/to/inferno
 ```
 
-Or use the wrapper script:
-```sh
-cd test
-./run_test.sh
-```
+The Makefile handles building the bridge image, the inferno2pipe image (with submodule init), and running docker-compose.
 
 ## Test Architecture
 
@@ -235,6 +264,45 @@ docker compose up --build
 ```
 
 The `--build` flag rebuilds changed images. The bridge Dockerfile doesn't cache Cargo dependencies between builds (no separate dep-fetch layer), so a full rebuild takes ~2 minutes.
+
+## Multi-Stream Test (`make test-multi`)
+
+Tests 16 bridge instances all connected to the same Sendspin server, simulating a real multi-room deployment where all zones play the same stream in sync.
+
+### What it does
+
+- 1 Sendspin server serving a 1kHz test tone
+- 16 bridge containers (SS01–SS16), each a separate DANTE TX device
+- 16 i2pipe containers (rx01–rx16), each capturing one bridge's output
+- 1 control container that creates all 32 subscriptions and analyzes results
+
+### What it measures
+
+1. **Signal presence**: Each of the 16 captures is checked for non-zero audio
+2. **Cross-stream sync**: Compares the onset (first non-zero sample) across all 16 captures and reports the spread in samples and milliseconds
+
+```
+Onset spread: 48 samples (1.00ms)
+SYNC: GOOD (spread < 10ms)
+```
+
+Sync quality thresholds:
+- **GOOD**: < 10ms spread (< 480 samples)
+- **FAIR**: < 100ms spread
+- **POOR**: >= 100ms spread
+
+### Resource requirements
+
+35 containers total (16 bridges + 16 receivers + clock + source + control). Each inferno DeviceServer uses a real-time thread. Expect:
+- ~2-3GB RAM
+- Significant CPU during startup (all containers building/initializing in parallel)
+- ~3-4 minutes total runtime (builds + discovery timeout + 20s recording)
+
+### Container naming
+
+Each bridge/receiver needs a unique `INFERNO_DEVICE_ID` to avoid mDNS conflicts. The compose file assigns sequential IDs:
+- Bridges: `0000000000000101` through `0000000000000110`
+- Receivers: `0000000000000201` through `0000000000000210`
 
 ## Known Limitations
 

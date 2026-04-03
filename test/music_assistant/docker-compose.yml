@@ -1,0 +1,12 @@
+services:
+  music_assistant:
+    image: ghcr.io/music-assistant/server:latest
+    container_name: music-assistant-test
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-America/New_York}
+    volumes:
+      - ./data:/data
+      - ./media:/media:ro
+
