@@ -9,7 +9,7 @@ All testing runs in Docker containers — no local Rust toolchain, ALSA, or PTP 
   ```
   projects-tmp/
   ├── inferno/          # git submodule update --init --recursive
-  └── sendspin-bridge/  # this repo
+  └── spin2dante/  # this repo
   ```
 
 ## Music Assistant Test Server
@@ -79,7 +79,7 @@ Six Docker containers on a shared bridge network:
        │                   │ WebSocket           │ netaudio
        │    ┌──────────────▼───────────┐         │ subscription
        ├───→│     bridge               │         │
-       │    │  (sendspin_bridge)       │◄────────┘
+       │    │  (spin2dante)       │◄────────┘
        │    │  DANTE TX: "SSBridge"    │
        │    └──────────────┬───────────┘
        │                   │ DANTE multicast UDP
@@ -120,7 +120,7 @@ bridge:
   environment:
     TMPDIR: /shared/tmp_bridge
   entrypoint: ["/bin/sh", "-c"]
-  command: ["mkdir -p /shared/tmp_bridge && exec sendspin_bridge ..."]
+  command: ["mkdir -p /shared/tmp_bridge && exec spin2dante ..."]
 ```
 
 The clock_source also needs `USRVCLOCK_SOCKET=/shared/usrvclock` set explicitly.
@@ -259,7 +259,7 @@ docker compose down --remove-orphans
 ```sh
 # Rebuild just the bridge image (uses Docker cache for dependencies)
 cd ..
-docker build -t sendspin-bridge .
+docker build -t spin2dante .
 
 # Then re-run tests
 cd test

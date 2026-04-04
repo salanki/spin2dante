@@ -1,5 +1,5 @@
 [package]
-name = "sendspin_bridge"
+name = "spin2dante"
 version = "0.1.0"
 edition = "2021"
 description = "Bridge from Sendspin audio streams to DANTE (Audio over IP) via inferno_aoip"

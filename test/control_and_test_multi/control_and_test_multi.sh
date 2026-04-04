@@ -4,7 +4,7 @@ set -e
 STREAM_COUNT=16
 RECORD_SECS=20
 
-echo "=== Sendspin Bridge Multi-Stream E2E Test (${STREAM_COUNT} streams) ==="
+echo "=== spin2dante Multi-Stream E2E Test (${STREAM_COUNT} streams) ==="
 echo "Waiting for all DANTE devices to appear..."
 
 # Wait for all 16 bridges and 16 receivers

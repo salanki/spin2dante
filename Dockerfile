@@ -8,5 +8,5 @@ RUN cargo build --release 2>&1
 
 FROM alpine:3
 RUN apk add --no-cache alsa-lib libgcc
-COPY --from=builder /build/target/release/sendspin_bridge /usr/local/bin/
-ENTRYPOINT ["sendspin_bridge"]
+COPY --from=builder /build/target/release/spin2dante /usr/local/bin/
+ENTRYPOINT ["spin2dante"]

@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-echo "=== Sendspin Bridge E2E Test ==="
+echo "=== spin2dante E2E Test ==="
 echo "Waiting for devices to appear on the network..."
 
 # Wait for both devices to be discoverable
