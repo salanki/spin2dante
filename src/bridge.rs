@@ -345,8 +345,10 @@ impl SendspinBridge {
         let params = ring_buffer.as_external_params();
 
         let short_name = self.device_name.chars().take(14).collect::<String>();
+        let mut config = std::collections::BTreeMap::new();
+        config.insert("NAME".to_string(), self.device_name.clone());
         let mut settings =
-            Settings::new(&self.device_name, &short_name, None, &Default::default());
+            Settings::new(&self.device_name, &short_name, None, &config);
         settings.make_tx_channels(CHANNELS);
         settings.make_rx_channels(0);
 
