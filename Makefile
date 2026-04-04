@@ -1,6 +1,8 @@
 INFERNO_DIR ?= ../inferno
+MUSIC_ASSISTANT_COMPOSE ?= test/music_assistant/docker-compose.yml
+MUSIC_ASSISTANT_DOCKER_CONFIG ?= /tmp/music-assistant-docker-config
 
-.PHONY: build test test-multi test-resilience clean
+.PHONY: build test test-multi test-resilience test-ptp ma-up ma-down ma-logs clean
 
 ## Build the bridge Docker image
 build:
@@ -35,8 +37,31 @@ test-resilience: build
 	docker compose -f docker-compose.resilience.yml down --remove-orphans; \
 	exit $$result
 
+## Run the real PTP test (Statime instead of fake clock)
+test-ptp: build inferno2pipe
+	cd test && docker compose -f docker-compose.ptp.yml down --remove-orphans 2>/dev/null; \
+	docker compose -f docker-compose.ptp.yml up --build --abort-on-container-exit control_and_test; \
+	result=$$?; \
+	docker compose -f docker-compose.ptp.yml down --remove-orphans; \
+	exit $$result
+
+## Start the Music Assistant test server with a clean GHCR Docker config
+ma-up:
+	mkdir -p $(MUSIC_ASSISTANT_DOCKER_CONFIG)
+	test -f $(MUSIC_ASSISTANT_DOCKER_CONFIG)/config.json || printf '{"auths":{}}\n' > $(MUSIC_ASSISTANT_DOCKER_CONFIG)/config.json
+	docker --config $(MUSIC_ASSISTANT_DOCKER_CONFIG) compose -f $(MUSIC_ASSISTANT_COMPOSE) up -d
+
+## Stop the Music Assistant test server
+ma-down:
+	docker --config $(MUSIC_ASSISTANT_DOCKER_CONFIG) compose -f $(MUSIC_ASSISTANT_COMPOSE) down
+
+## Tail Music Assistant logs
+ma-logs:
+	docker --config $(MUSIC_ASSISTANT_DOCKER_CONFIG) compose -f $(MUSIC_ASSISTANT_COMPOSE) logs -f --tail 200
+
 ## Remove all test containers, networks, and volumes
 clean:
 	cd test && docker compose down --remove-orphans --volumes 2>/dev/null || true
 	cd test && docker compose -f docker-compose.multi.yml down --remove-orphans --volumes 2>/dev/null || true
 	cd test && docker compose -f docker-compose.resilience.yml down --remove-orphans --volumes 2>/dev/null || true
+	cd test && docker compose -f docker-compose.ptp.yml down --remove-orphans --volumes 2>/dev/null || true

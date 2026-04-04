@@ -1,0 +1,28 @@
+# Statime PTPv2 configuration for Docker-based testing.
+#
+# Runs as PTP leader (master) using software timestamps on CLOCK_MONOTONIC_RAW.
+# Exports clock to inferno devices via the usrvclock protocol socket.
+#
+# This gives all inferno containers a real PTP-synchronized clock instead of
+# the fake_usrvclock_server used in dev tests.
+
+loglevel = "info"
+
+sdo-id = 0
+domain = 0
+# Low priority1 = become PTP master (leader) in the Docker network
+priority1 = 128
+priority2 = 128
+
+virtual-system-clock = true
+virtual-system-clock-base = "monotonic_raw"
+
+# Export clock via usrvclock protocol — inferno reads from this socket
+usrvclock-export = true
+usrvclock-path = "/shared/usrvclock"
+
+[[port]]
+interface = "eth0"
+network-mode = "ipv4"
+hardware-clock = "none"  # No hardware PTP in Docker
+protocol-version = "PTPv2"
