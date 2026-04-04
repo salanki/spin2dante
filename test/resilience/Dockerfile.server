@@ -1,0 +1,5 @@
+FROM python:3.13-alpine
+RUN pip install --no-cache-dir websockets
+COPY test_server.py /test_server.py
+EXPOSE 8927
+CMD ["python3", "-u", "/test_server.py"]

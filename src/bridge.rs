@@ -323,13 +323,15 @@ impl SendspinBridge {
                 }
             }
             Message::StreamEnd(_) => {
-                info!("stream ended");
+                info!("stream ended, stopping transmitter");
                 self.stop_transmitter().await;
+                info!("state transition: {} -> Idle",
+                    if self.state == BridgeState::Idle { "Idle" } else { "Running/Other" });
             }
             Message::StreamClear(_) => {
                 // stream/clear = seek or config update. Keep device alive,
                 // discard stale buffered audio, wait for fresh data.
-                info!("stream cleared");
+                info!("stream cleared, discarding buffered audio and entering rebuffer mode");
                 self.clear_and_rebuffer();
             }
             _ => {

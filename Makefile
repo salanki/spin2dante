@@ -1,6 +1,6 @@
 INFERNO_DIR ?= ../inferno
 
-.PHONY: build test test-multi clean
+.PHONY: build test test-multi test-resilience clean
 
 ## Build the bridge Docker image
 build:
@@ -27,7 +27,16 @@ test-multi: build inferno2pipe
 	docker compose -f docker-compose.multi.yml down --remove-orphans; \
 	exit $$result
 
+## Run the resilience test (stream stop/start, seek, server restart)
+test-resilience: build
+	cd test && docker compose -f docker-compose.resilience.yml down --remove-orphans 2>/dev/null; \
+	docker compose -f docker-compose.resilience.yml up --build --abort-on-container-exit validator; \
+	result=$$?; \
+	docker compose -f docker-compose.resilience.yml down --remove-orphans; \
+	exit $$result
+
 ## Remove all test containers, networks, and volumes
 clean:
 	cd test && docker compose down --remove-orphans --volumes 2>/dev/null || true
 	cd test && docker compose -f docker-compose.multi.yml down --remove-orphans --volumes 2>/dev/null || true
+	cd test && docker compose -f docker-compose.resilience.yml down --remove-orphans --volumes 2>/dev/null || true

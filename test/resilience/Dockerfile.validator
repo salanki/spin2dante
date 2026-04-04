@@ -1,0 +1,4 @@
+FROM alpine:3
+COPY validate.sh /validate.sh
+RUN chmod +x /validate.sh
+ENTRYPOINT ["/validate.sh"]
