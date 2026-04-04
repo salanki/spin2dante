@@ -9,4 +9,6 @@ FROM alpine:3
 RUN apk add --no-cache libgcc
 COPY --from=builder /build/target/release/statime /usr/local/bin/statime
 COPY statime-docker.toml /etc/statime.toml
-ENTRYPOINT ["statime", "-c", "/etc/statime.toml"]
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]

@@ -29,13 +29,23 @@ done
 
 echo ""
 echo "=== Creating audio subscriptions ==="
-# Extract bridge device name dynamically (it includes a random suffix)
-bridge_name=$(echo "$devices" | grep "SSBridge" | awk '{print $1, $2}')
-echo "Bridge device name: '$bridge_name'"
+# Extract bridge device name dynamically.
+# The name may be single-word ("SSBridge") or two-word with hex suffix ("SSBridge ac150004").
+# Try the full first two columns; if that fails, try just the first column.
+bridge_full=$(echo "$devices" | grep "SSBridge" | awk '{print $1, $2}')
+bridge_short=$(echo "$devices" | grep "SSBridge" | awk '{print $1}')
+echo "Bridge device name (full): '$bridge_full'"
+echo "Bridge device name (short): '$bridge_short'"
 
-# netaudio uses channel@device format
-netaudio subscription add --tx "01@${bridge_name}" --rx "01@i2pipe" || echo "Sub 1 failed"
+# netaudio uses channel@device format — try full name first, fall back to short
+if netaudio subscription add --tx "01@${bridge_full}" --rx "01@i2pipe" 2>/dev/null; then
+    bridge_name="$bridge_full"
+else
+    bridge_name="$bridge_short"
+    netaudio subscription add --tx "01@${bridge_name}" --rx "01@i2pipe" || echo "Sub 1 failed"
+fi
 netaudio subscription add --tx "02@${bridge_name}" --rx "02@i2pipe" || echo "Sub 2 failed"
+echo "Using bridge name: '$bridge_name'"
 
 echo "Subscriptions created. Recording for 20 seconds..."
 sleep 20

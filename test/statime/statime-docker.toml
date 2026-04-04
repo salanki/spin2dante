@@ -17,6 +17,10 @@ priority2 = 128
 virtual-system-clock = true
 virtual-system-clock-base = "monotonic_raw"
 
+# Manual clock identity — Docker virtual NICs don't have hardware MAC addresses
+# that Statime can derive an identity from, so we set one explicitly.
+identity = "0000000000000001"
+
 # Export clock via usrvclock protocol — inferno reads from this socket
 usrvclock-export = true
 usrvclock-path = "/shared/usrvclock"

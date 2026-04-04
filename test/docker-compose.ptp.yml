@@ -24,8 +24,10 @@ services:
       context: ./statime
     volumes:
       - shared:/shared
-    networks:
-      - audio_net
+    # Statime needs a real NIC with a globally-administered MAC address
+    # to derive its clock identity (bug: eager evaluation in unwrap_or).
+    # Use host network so it can see the host's physical NIC.
+    network_mode: host
     cap_add:
       - SYS_TIME    # Required for clock operations
       - NET_BIND_SERVICE
