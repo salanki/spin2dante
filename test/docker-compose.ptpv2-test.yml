@@ -79,7 +79,7 @@ services:
       TMPDIR: /shared/tmp_bridge
       RUST_LOG: "info"
     depends_on:
-      ptp-master:
+      ptp-follower:
         condition: service_started
       sendspin_source:
         condition: service_started
