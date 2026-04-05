@@ -24,11 +24,15 @@ const METRICS_INTERVAL_SECS: u64 = 5;
 enum BridgeState {
     /// No stream active, DANTE device may or may not be running.
     Idle,
-    /// Receiving audio, filling jitter buffer before considering it "running".
+    /// Receiving audio into ring buffer, but no subscriber yet.
+    /// Audio is written as a circular scratch buffer. When a subscriber
+    /// appears (read_pos starts advancing), we snap to live and prebuffer.
+    WaitingForSubscriber,
+    /// Subscriber detected, filling jitter buffer with fresh audio.
     Prebuffering,
-    /// Actively transmitting.
+    /// Actively transmitting, subscriber consuming audio.
     Running,
-    /// Stream was cleared (seek/config change), discarding stale audio.
+    /// Stream was cleared (seek/config change), realigning to live.
     Rebuffering,
 }
 
@@ -166,6 +170,8 @@ pub struct SendspinBridge {
     current_timestamp: Arc<AtomicUsize>,
     stream_format: Option<StreamFormat>,
     metrics: BufferMetrics,
+    /// Tracks last observed read_pos for subscriber detection.
+    last_read_pos: usize,
 }
 
 impl SendspinBridge {
@@ -183,6 +189,7 @@ impl SendspinBridge {
             current_timestamp: Arc::new(AtomicUsize::new(usize::MAX)),
             stream_format: None,
             metrics: BufferMetrics::new(prebuffer_target),
+            last_read_pos: 0,
         }
     }
 
@@ -303,7 +310,7 @@ impl SendspinBridge {
                     }
 
                     // If DANTE device already running with same format,
-                    // treat as a stream boundary (clear stale audio, rebuffer).
+                    // treat as a stream boundary (clear + rebuffer).
                     if self.device_server.is_some() && self.stream_format.as_ref() == Some(&format)
                     {
                         info!("stream/start with same format: clearing and rebuffering");
@@ -325,12 +332,9 @@ impl SendspinBridge {
             Message::StreamEnd(_) => {
                 info!("stream ended, stopping transmitter");
                 self.stop_transmitter().await;
-                info!("state transition: {} -> Idle",
-                    if self.state == BridgeState::Idle { "Idle" } else { "Running/Other" });
+                info!("state transition -> Idle");
             }
             Message::StreamClear(_) => {
-                // stream/clear = seek or config update. Keep device alive,
-                // discard stale buffered audio, wait for fresh data.
                 info!("stream cleared, discarding buffered audio and entering rebuffer mode");
                 self.clear_and_rebuffer();
             }
@@ -368,25 +372,34 @@ impl SendspinBridge {
             )
             .await;
 
-        // Send start_time=0 immediately. This starts the FlowsTransmitter
-        // without blocking on subscriber presence.
-        //
-        // Clock model: start_time=0 means inferno reads at
-        //   (ptp_now - 0 - latency) % RING_BUFFER_SIZE
-        // Since unconditional_read() is true for ExternalBuffer, inferno reads
-        // whatever is in the ring at that position. Our writes at monotonically
-        // increasing positions will wrap around the same ring buffer. As long as
-        // we stay ahead of the read position, audio flows correctly.
         info!("starting FlowsTransmitter (start_time=0)");
         let _ = start_tx.send(0);
 
         self.ring_buffer = Some(ring_buffer);
         self.device_server = Some(server);
-        self.enter_prebuffering();
+        self.last_read_pos = 0;
+
+        // Enter WaitingForSubscriber — audio goes into ring buffer as scratch
+        // until a DANTE subscriber appears and read_pos starts advancing.
+        self.state = BridgeState::WaitingForSubscriber;
+        self.metrics.reset();
+        info!("waiting for DANTE subscriber...");
     }
 
-    /// Enter prebuffering state. Writes start at current write_pos.
-    fn enter_prebuffering(&mut self) {
+    /// Snap write_pos to live position and enter prebuffering.
+    /// Called when a subscriber is first detected (read_pos starts moving).
+    fn snap_to_live(&mut self) {
+        if let Some(rb) = &mut self.ring_buffer {
+            let read_pos = rb.read_pos();
+            // Zero-fill the jitter buffer region ahead of where inferno is reading
+            rb.zero_range(read_pos, self.prebuffer_target);
+            // Set write_pos so fresh audio lands right after the zeroed region
+            rb.write_pos = read_pos.wrapping_add(self.prebuffer_target);
+            info!(
+                "subscriber detected: snapping to live, read_pos={}, write_pos={}",
+                read_pos, rb.write_pos
+            );
+        }
         self.prebuffer_written = 0;
         self.state = BridgeState::Prebuffering;
         self.metrics.reset();
@@ -397,15 +410,10 @@ impl SendspinBridge {
     }
 
     /// Discard stale buffered audio and enter rebuffer mode.
-    ///
-    /// Zero-fills the region inferno is about to read [read_pos, read_pos + prebuffer_target),
-    /// then sets write_pos to read_pos + prebuffer_target so new audio lands after the silence.
     fn clear_and_rebuffer(&mut self) {
         if let Some(rb) = &mut self.ring_buffer {
             let read_pos = rb.read_pos();
-            // Zero-fill the region inferno will read during prebuffering
             rb.zero_range(read_pos, self.prebuffer_target);
-            // Set write_pos so new data lands right after the zeroed region
             rb.write_pos = read_pos.wrapping_add(self.prebuffer_target);
             info!(
                 "cleared stale audio: zeroed [{}, +{}), write_pos={}",
@@ -426,9 +434,8 @@ impl SendspinBridge {
             }
         };
 
-        match self.state {
-            BridgeState::Idle => return,
-            BridgeState::Prebuffering | BridgeState::Running | BridgeState::Rebuffering => {}
+        if self.state == BridgeState::Idle {
+            return;
         }
 
         let rb = match &mut self.ring_buffer {
@@ -439,10 +446,23 @@ impl SendspinBridge {
         let frames_written = match format.bit_depth {
             24 => rb.write_pcm_24bit_le(&chunk.data),
             16 => rb.write_pcm_16bit_le(&chunk.data),
-            _ => 0, // unreachable: enforced at StreamStart
+            _ => 0,
         };
 
-        // Prebuffering/Rebuffering: accumulate before declaring "running"
+        // Check for subscriber arrival in WaitingForSubscriber state
+        if self.state == BridgeState::WaitingForSubscriber {
+            let read_pos = self.ring_buffer.as_ref().unwrap().read_pos();
+            if read_pos != self.last_read_pos && read_pos != 0 {
+                // read_pos is advancing — a subscriber connected!
+                self.snap_to_live();
+                return; // snap_to_live resets write_pos, skip further processing this chunk
+            }
+            self.last_read_pos = read_pos;
+            // Still no subscriber — audio written to ring as scratch, keep going
+            return;
+        }
+
+        // Prebuffering/Rebuffering: accumulate fresh audio
         if self.state == BridgeState::Prebuffering || self.state == BridgeState::Rebuffering {
             self.prebuffer_written += frames_written;
             if self.prebuffer_written >= self.prebuffer_target {
@@ -465,10 +485,16 @@ impl SendspinBridge {
     }
 
     fn log_metrics(&mut self) {
-        if self.state == BridgeState::Running {
-            if let Some(rb) = &self.ring_buffer {
-                self.metrics.log(rb.write_pos, rb.read_pos());
+        match self.state {
+            BridgeState::WaitingForSubscriber => {
+                info!("[buffer] waiting for DANTE subscriber");
             }
+            BridgeState::Running => {
+                if let Some(rb) = &self.ring_buffer {
+                    self.metrics.log(rb.write_pos, rb.read_pos());
+                }
+            }
+            _ => {}
         }
     }
 

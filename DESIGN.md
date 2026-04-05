@@ -62,37 +62,57 @@ The `get_realtime_clock_receiver()` API returns a `RealTimeBoxReceiver` designed
 1. `DeviceServer::start()` — creates DANTE device, waits for PTP clock
 2. `transmit_from_external_buffer()` — registers ring buffers
 3. `start_tx.send(0)` — starts FlowsTransmitter immediately (no blocking)
-4. Bridge enters Prebuffering state, writes audio at positions 0, 1, 2...
-5. After `prebuffer_target` samples written, transitions to Running
+4. Bridge enters **WaitingForSubscriber** state
+5. Audio is written to the ring buffer as a circular scratch buffer
+6. When a DANTE subscriber connects (read_pos starts advancing), bridge snaps to live and enters Prebuffering
+7. After `prebuffer_target` samples of fresh audio written, transitions to Running
 
 The FlowsTransmitter may report "clock unavailable" until it receives its first PTP overlay from the background clock thread. This is non-blocking — the bridge continues writing audio regardless. Once the clock becomes available, inferno starts reading and transmitting.
+
+### Why WaitingForSubscriber exists
+
+Without this state, the bridge would write audio into the ring buffer starting at position 0 while inferno reads at `(ptp_now - latency) % RING_BUFFER_SIZE`. These are in completely different domains. If a DANTE subscriber connects later, it reads whatever happens to be at that ring position — which is stale audio from seconds ago, not the live stream. Multiple subscribers connecting at different times would hear different offsets.
+
+The fix: the bridge writes to the ring buffer as scratch (keeping the WebSocket alive) but doesn't commit to a live position until a subscriber actually appears. When read_pos starts advancing, the bridge calls `snap_to_live()`:
+
+1. Read the current `read_pos` from `PositionReportDestination`
+2. Zero-fill `[read_pos, read_pos + prebuffer_target)` — silence during prebuffer
+3. Set `write_pos = read_pos + prebuffer_target` — fresh audio lands right after
+4. Enter Prebuffering — accumulate jitter buffer with live audio
+
+This ensures every subscriber hears current audio from the moment it connects.
 
 ## State Machine
 
 ```
         StreamStart
-  Idle ───────────→ Prebuffering ──→ Running
-                         ↑               │
-                         │  StreamStart   │
-                         │  StreamClear   │
-                         └──── Rebuffering←┘
-                                   │
-                         StreamEnd │
-                              Idle ←┘
+  Idle ───────────→ WaitingForSubscriber ──→ Prebuffering ──→ Running
+                           ↑                      ↑               │
+                           │                      │  StreamStart   │
+                           │ subscriber lost       │  StreamClear   │
+                           │                      └──── Rebuffering←┘
+                           │                                │
+                           │                      StreamEnd │
+                           └──────────────────────── Idle ←─┘
 ```
 
 - **Idle**: No stream, DANTE device may not exist
-- **Prebuffering**: Writing audio, accumulating jitter buffer
+- **WaitingForSubscriber**: Receiving audio into scratch buffer, DANTE device registered but no subscriber consuming. Audio is not committed to a live position.
+- **Prebuffering**: Subscriber detected, writing fresh audio to fill jitter buffer
 - **Running**: Actively transmitting, metrics logged
 - **Rebuffering**: Stream cleared/restarted, stale audio discarded, refilling
 
 ### Stream lifecycle handling
 
-- **StreamStart (first)**: Start DANTE device, enter Prebuffering
+- **StreamStart (first)**: Start DANTE device, enter WaitingForSubscriber
 - **StreamStart (same format)**: Clear stale audio, enter Rebuffering (no device restart)
 - **StreamStart (different format)**: Stop device, restart with new format
 - **StreamClear**: Zero-fill from current read_pos, jump write_pos ahead, enter Rebuffering
 - **StreamEnd**: Stop transmitter, enter Idle
+
+### Subscriber detection
+
+The bridge monitors `read_pos` from `PositionReportDestination`. When `read_pos` changes from its initial value, a subscriber has connected and inferno is consuming audio. This triggers `snap_to_live()`.
 
 ### Clear/Rebuffer behavior
 
