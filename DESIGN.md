@@ -248,11 +248,21 @@ The "start at zero" model avoids both problems: send `start_time=0` immediately,
 
 ### Why Statime can't be a standalone PTP master in Docker
 
-Statime as a PTP master with no followers has nothing to synchronize against. Its overlay export callback only fires on clock adjustments, which don't happen for a masterless PTP node. Result: the usrvclock socket is created but no overlays are ever sent, so inferno's FlowsTransmitter permanently reports "clock unavailable."
+Only PTP **followers** export usrvclock overlays. A PTP master doesn't adjust its clock (it IS the reference), so the overlay export callback never fires. This is true regardless of whether the master has followers or not.
 
-The fake_usrvclock_server (used in `make test`) works because it sends periodic overlays unconditionally (every 1 second via `select()` timeout), regardless of PTP state.
+For production, you need:
+1. A PTP master on the network (DANTE hardware, or Statime in PTPv2 master mode)
+2. A Statime **follower** that syncs to the master and exports usrvclock
 
-For production, you need real DANTE hardware on the network acting as PTP master.
+The `fake_usrvclock_server` (used in `make test`) sidesteps this by sending periodic overlays unconditionally (every 1 second), but the overlay values are not PTP-synchronized — they're based on `CLOCK_MONOTONIC_RAW` with zero offset.
+
+For Docker-only testing with real PTP: `make test-ptpv2` runs a Statime master + follower pair. The follower syncs to the master and exports valid overlays.
+
+### PositionReportDestination limitation
+
+Inferno's `ExternalBuffer::unconditional_read()` returns `true`, which skips the `readable_pos` update in `RBOutput::read_at()`. This means `PositionReportDestination` is never updated for our ExternalBuffer-based ring buffers, even when the FlowsTransmitter IS actively reading and sending packets.
+
+Consequence: `read_pos` from PositionReportDestination is always 0. Buffer metrics (fill, drift, subscriber detection via read_pos) are unreliable. The WaitingForSubscriber snap_to_live mechanism cannot trigger. Audio flows correctly regardless — this only affects observability.
 
 ### Why VMs and Docker virtual NICs break Statime identity
 

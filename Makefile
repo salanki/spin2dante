@@ -2,7 +2,7 @@ INFERNO_DIR ?= ../inferno
 MUSIC_ASSISTANT_COMPOSE ?= test/music_assistant/docker-compose.yml
 MUSIC_ASSISTANT_DOCKER_CONFIG ?= /tmp/music-assistant-docker-config
 
-.PHONY: build test test-multi test-resilience test-ptp test-ma-interactive ma-up ma-down ma-logs clean
+.PHONY: build test test-multi test-resilience test-ptp test-ptpv2 test-ma-interactive ma-up ma-down ma-logs clean
 
 ## Build the bridge Docker image
 build:
@@ -43,6 +43,14 @@ test-ptp: build inferno2pipe
 	docker compose -f docker-compose.ptp.yml up --build --abort-on-container-exit control_and_test; \
 	result=$$?; \
 	docker compose -f docker-compose.ptp.yml down --remove-orphans; \
+	exit $$result
+
+## Run PTPv2 test (real PTP clock, no hardware needed — master + follower on Docker)
+test-ptpv2: build inferno2pipe
+	cd test && docker compose -f docker-compose.ptpv2-test.yml down --remove-orphans 2>/dev/null; \
+	docker compose -f docker-compose.ptpv2-test.yml up --build --abort-on-container-exit control_and_test; \
+	result=$$?; \
+	docker compose -f docker-compose.ptpv2-test.yml down --remove-orphans; \
 	exit $$result
 
 ## Interactive Music Assistant test (2 bridges, full DANTE path, runs until ctrl-c)

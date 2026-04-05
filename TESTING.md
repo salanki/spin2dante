@@ -311,17 +311,68 @@ Each bridge/receiver needs a unique `INFERNO_DEVICE_ID` to avoid mDNS conflicts.
 - Bridges: `0000000000000101` through `0000000000000104`
 - Receivers: `0000000000000201` through `0000000000000204`
 
-## Real PTP Test (`make test-ptp`)
+## PTPv2 Test (`make test-ptpv2`)
 
-**Status: not functional in pure Docker.** This test infrastructure exists but requires real DANTE hardware on the LAN. For CI/Docker-only testing, use `make test` instead.
+Uses real PTP clock synchronization via two Statime instances instead of the `fake_usrvclock_server`. This validates the bridge with proper PTP timing — no real DANTE hardware required.
 
-Uses [Statime](https://github.com/teodly/statime/tree/inferno-dev) (PTP daemon) instead of `fake_usrvclock_server`. The test compose (`test/docker-compose.ptp.yml`) runs Statime on a Docker bridge network with PTPv1, software timestamps (`hardware-clock = "none"`). It shares the production Statime config from `statime/statime-docker.toml`.
+### Architecture
 
-### Why this doesn't work in pure Docker
+```
+┌────────────────────┐
+│  Statime PTPv2     │ ← PTP master (clock reference)
+│  MASTER            │    Does NOT export usrvclock
+│  priority1=128     │
+└────────┬───────────┘
+         │ PTP sync messages (multicast)
+         ▼
+┌────────────────────┐
+│  Statime PTPv2     │ ← PTP follower (syncs to master)
+│  FOLLOWER          │    EXPORTS usrvclock overlays
+│  priority1=255     │    /shared/usrvclock socket
+└────────┬───────────┘
+         │ usrvclock (Unix datagram socket)
+         ▼
+┌────────────────────┐     ┌──────────────────┐
+│  spin2dante bridge │ ──→ │ inferno2pipe     │
+│  (DANTE TX)        │     │ (DANTE RX)       │
+│  reads usrvclock   │     │ reads usrvclock  │
+└────────────────────┘     └──────────────────┘
+         ↑                          ↑
+         └──── both read from ──────┘
+               /shared/usrvclock
+```
 
-Statime as a PTPv1 follower with no PTP master on the network never receives sync messages, so it never exports clock overlays via usrvclock. Inferno's FlowsTransmitter permanently reports "clock unavailable." The `fake_usrvclock_server` avoids this by sending unconditional periodic updates regardless of PTP state.
+### Why master + follower
 
-To actually use this test, you need DANTE hardware on the network as PTP master, and Statime must be able to reach it (may require `network_mode: host` on the Statime container in the test compose).
+Only PTP **followers** export usrvclock overlays. A master doesn't adjust its clock (it IS the reference), so the overlay export callback never fires. The follower syncs to the master and continuously adjusts its clock, triggering overlay exports that inferno reads.
+
+### Key discovery: PositionReportDestination doesn't work with ExternalBuffer
+
+Inferno's `ExternalBuffer::unconditional_read()` returns `true`, which skips the `readable_pos` update in `read_at()`. This means `PositionReportDestination` is never updated, so our `read_pos`-based metrics always show 0. Audio flows correctly — the FlowsTransmitter reads and sends packets — but we can't observe the read position from the bridge code.
+
+This is why buffer metrics (fill, drift, overruns) are unreliable even with a real PTP clock.
+
+### Running the test
+
+```sh
+make test-ptpv2
+```
+
+The Statime Docker image builds from source on first run (~3 min). Subsequent runs use cached images.
+
+### Config files
+
+- `statime/statime-ptpv2-master.toml` — PTPv2 master, no usrvclock export
+- `statime/statime-ptpv2-follower.toml` — PTPv2 follower, exports usrvclock
+- `test/docker-compose.ptpv2-test.yml` — single bridge + i2pipe with both Statime instances
+
+### Timing notes
+
+The follower needs ~10-15s to sync with the master and start exporting overlays. The bridge depends on the follower container (`depends_on: ptp-follower`) to ensure it starts after the follower, but the bridge's FlowsTransmitter still polls in a 1s retry loop until the overlay arrives.
+
+## Legacy PTP test (`make test-ptp`)
+
+The original PTPv1 test (`test/docker-compose.ptp.yml`) is non-functional in pure Docker — it requires real DANTE hardware as PTP master. Use `make test-ptpv2` instead for Docker-only PTP testing.
 
 ## Edge Case Behavior
 
