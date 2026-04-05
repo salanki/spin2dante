@@ -372,6 +372,7 @@ impl SendspinBridge {
             }
         }
         self.write_pos = read_pos.wrapping_add(self.prebuffer_target);
+        info!("cleared stale audio, entering Rebuffering (read_pos={}, write_pos={})", read_pos, self.write_pos);
         self.prebuffer_written = 0;
         self.reset_sync();
         self.state = BridgeState::Rebuffering;
