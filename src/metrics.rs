@@ -39,6 +39,7 @@ impl BufferMetrics {
         self.underruns = 0;
         self.overruns = 0;
         self.fill_history.clear();
+        self.last_read_pos = 0;
         self.stalled_intervals = 0;
         self.was_stalled = false;
     }

@@ -170,7 +170,7 @@ The bridge **rejects** streams at StreamStart that don't match:
 
 ## Reconnection
 
-The bridge has an outer reconnect loop. If the WebSocket drops (server restart, network issue), it stops the current session, waits 2 seconds, and reconnects. The DANTE device is stopped and recreated on reconnect since the stream state resets.
+The bridge has an outer reconnect loop. If the WebSocket drops (server restart, network issue), it zeros the ring buffer, enters Idle, waits 2 seconds, and reconnects. The DANTE device stays on the network — only the stream state resets.
 
 ## Codec Support
 
