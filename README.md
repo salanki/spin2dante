@@ -2,7 +2,7 @@
 
 Bridge [Sendspin](https://www.sendspin-audio.com/) audio streams to [DANTE](https://www.getdante.com/) network audio receivers.
 
-The primary use case is connecting DANTE-compatible audio devices (amplifiers, speakers, DSPs) to music streamers — in particular [Music Assistant](https://www.music-assistant.io/). Each bridge instance appears as a Sendspin player in Music Assistant and as a DANTE transmitter on the network. You subscribe your DANTE receivers to the bridge's output channels using Dante Controller or `netaudio`. This gives you synchronized multi-room group playback across DANTE zones, controlled from Music Assistant.
+The primary use case is connecting DANTE-compatible audio devices (amplifiers, receivers, DSPs) to music streamers — in particular [Music Assistant](https://www.music-assistant.io/). Each bridge instance appears as a Sendspin player in Music Assistant and as a DANTE transmitter on the network. You subscribe your DANTE receivers to the bridge's output channels using Dante Controller or `netaudio`. This gives you synchronized multi-room group playback across DANTE zones, controlled from Music Assistant.
 
 spin2dante is a pure protocol bridge. Audio flows directly from the Sendspin WebSocket stream into DANTE network packets — it does **not** pass through the host's audio subsystem (no ALSA, PulseAudio, or PipeWire involved). The implementation is lossless and bit-perfect for PCM audio, running entirely in userspace.
 
@@ -16,7 +16,7 @@ Music Assistant
 └────┬─────┘
      │ DANTE (multicast UDP)
      ▼
-DANTE Receivers (amplifiers, speakers, etc.)
+DANTE Receivers (amplifiers, receivers, etc.)
 ```
 
 ## Requirements
@@ -25,6 +25,41 @@ DANTE Receivers (amplifiers, speakers, etc.)
 - **Linux host** with a network interface on the same LAN as the DANTE devices
 - **Docker** with Docker Compose
 - **A Sendspin source** — typically [Music Assistant](https://www.music-assistant.io/) with the Sendspin provider enabled
+
+## Install in Home Assistant
+
+This repository includes Home Assistant add-ons for both `statime` and
+`spin2dante`.
+
+### Add the repository
+
+Open the add add-on repository dialog in your Home Assistant instance:
+
+[![Open your Home Assistant instance and add this add-on repository.](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fsalanki%2Fspin2dante)
+
+If the button does not work, add the repository manually:
+
+1. Open Home Assistant.
+2. Go to **Settings > Add-ons**.
+3. Open the add-on store.
+4. Open the menu in the top right and choose **Repositories**.
+5. Add `https://github.com/salanki/spin2dante`.
+
+### Install the add-ons
+
+1. Install `statime`.
+2. Configure its network and PTP settings for your environment.
+3. Start `statime` and confirm it creates the shared clock socket.
+4. Install `spin2dante`.
+5. Configure one or more bridge entries.
+6. Start `spin2dante`.
+7. Check the logs for both add-ons.
+
+### Recommended order
+
+- Start `statime` first.
+- Start `spin2dante` after the clock is available.
+- Then subscribe your DANTE receivers to the `spin2dante` transmitters using Dante Controller or `netaudio`.
 
 ## Quick Start
 
@@ -143,14 +178,13 @@ pip install netaudio
 netaudio device list
 ```
 
-**Subscribe a receiver to a bridge (stereo):**
+**Subscribe a receiver to a bridge (stereo — both channels):**
 ```sh
-# Route Kitchen bridge channel 01 → amplifier channel 01
 netaudio subscription add --tx "01@Kitchen" --rx "01@MyAmplifier"
 netaudio subscription add --tx "02@Kitchen" --rx "02@MyAmplifier"
 ```
 
-The `--tx` argument is `channel@device` for the transmitter (your bridge), and `--rx` is `channel@device` for the receiver (your DANTE amp/speaker). Channel names are typically `01`, `02` (factory names from inferno).
+Each bridge outputs stereo (channels `01` and `02`). You need to subscribe both channels to get stereo audio on the receiver. The `--tx` argument is `channel@device` for the transmitter (your bridge), and `--rx` is `channel@device` for the receiver (your DANTE amplifier/receiver).
 
 **List active subscriptions:**
 ```sh
