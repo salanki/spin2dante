@@ -1,4 +1,4 @@
-use log::{debug, info};
+use log::info;
 use std::time::Instant;
 
 /// Tracks jitter buffer health metrics for console logging.
@@ -79,21 +79,16 @@ impl BufferMetrics {
 
         if !read_advancing {
             self.stalled_intervals += 1;
-            if self.stalled_intervals >= 2 {
-                self.was_stalled = true;
-                debug!(
-                    "[buffer] read_pos not advancing (stalled for {} intervals, \
-                     fill={}, write_pos={}, read_pos={})",
-                    self.stalled_intervals, fill, write_pos, read_pos
-                );
-                return;
-            }
         } else {
             if self.was_stalled {
                 info!("[buffer] subscriber active; consumption resumed");
                 self.was_stalled = false;
             }
             self.stalled_intervals = 0;
+        }
+
+        if self.stalled_intervals >= 2 {
+            self.was_stalled = true;
         }
 
         let drift_ppm = self.estimate_drift_ppm();
