@@ -1,0 +1,16 @@
+configuration:
+  url:
+    name: Sendspin URL
+    description: WebSocket URL for the Sendspin stream source.
+  name:
+    name: DANTE device name
+    description: Name advertised for the DANTE transmitter.
+  buffer_ms:
+    name: Buffer size
+    description: Jitter buffer size in milliseconds.
+  clock_path:
+    name: Clock socket path
+    description: Path to the usrvclock socket provided by the PTP daemon.
+  log_level:
+    name: Log level
+    description: Verbosity of add-on logs.

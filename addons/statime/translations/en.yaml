@@ -1,0 +1,10 @@
+configuration:
+  ptp_interface:
+    name: PTP interface
+    description: Network interface to use for PTP. Set to auto to detect the default route interface.
+  clock_path:
+    name: Clock socket path
+    description: Path where the exported usrvclock socket will be created.
+  log_level:
+    name: Log level
+    description: Verbosity of add-on logs.
