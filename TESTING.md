@@ -356,9 +356,24 @@ The Statime config is at `test/statime/statime-docker.toml`. Key settings:
 
 A standalone PTP master with no followers never exports clock overlays via usrvclock — it has nothing to synchronize against. The fake_usrvclock_server used by `make test` avoids this by sending unconditional periodic updates. For CI/Docker-only testing, `make test` is the correct path.
 
+## Edge Case Behavior
+
+Tested and validated via `make test-resilience`:
+
+| Scenario | Bridge behavior |
+|----------|----------------|
+| **Sendspin server disconnects** | Bridge detects disconnect, logs "session ended with error", waits 2s, auto-reconnects. DANTE device is stopped and recreated on new session. |
+| **Stream seek (StreamClear)** | Stale buffered audio is zeroed from current read position. Bridge enters rebuffer mode, refills jitter buffer with fresh data, then resumes. |
+| **Stream ends (StreamEnd)** | Transmitter stopped, bridge enters Idle state. Waits for next StreamStart. |
+| **New stream with same format (StreamStart)** | Treated as a stream boundary — stale audio cleared, rebuffer mode, no device restart. |
+| **New stream with different format** | DANTE device fully restarted with new settings. |
+| **PTP master disappears** | Statime stops exporting clock overlays. FlowsTransmitter reports "clock unavailable" until PTP master returns. Audio stops but bridge stays alive. |
+| **Multiple StreamStart without StreamEnd** | Each treated as a stream boundary (clear + rebuffer). |
+
 ## Known Limitations
 
 - **No automated pass/fail**: The test checks signal presence but doesn't verify bit-perfect output or exact waveform shape. WavDiff comparison is planned.
 - **Sendspin source codec**: The `sendspin serve` command decides the codec. With a local WAV file it typically sends PCM, but behavior may vary by version.
-- **FlowsTransmitter startup delay**: 10-20s of "clock unavailable" is normal while the PTP clock propagates through inferno's internal channels.
+- **FlowsTransmitter startup delay**: 10-20s of "clock unavailable" is normal while the PTP clock propagates through inferno's internal channels. The fake_usrvclock_server sends overlays every 1 second; real Statime may take longer to converge.
 - **Single-run test audio**: The 30s test tone loops only if sendspin loops it. After 30s, the stream may end.
+- **FLAC not testable**: sendspin-rs v0.1 only has a PCM decoder. FLAC testing requires either a newer sendspin-rs or a custom decoder.
