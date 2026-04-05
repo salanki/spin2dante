@@ -60,7 +60,7 @@ This ensures all bridges receiving the same Sendspin stream write the same audio
 - `target far ahead of write frontier` → re-anchor (intentional discontinuity)
 - Otherwise → write at target
 
-**Fallback**: if `ClockSync` hasn't converged (e.g., test server without time sync), the bridge writes sequentially at `write_pos` — same behavior as before, no sync.
+**Fallback**: if `ClockSync` hasn't converged yet (e.g., early in the session before time sync completes), the bridge writes sequentially at `write_pos`. Once sync converges, the anchor is set and timestamp-driven positioning activates automatically. The `sendspin serve` CLI and Music Assistant both support time sync.
 
 ## PTP Clock Model
 
@@ -258,7 +258,7 @@ Inferno uses `friendly_hostname` from the `NAME` config key (our `--name` arg). 
 
 ## Future Work
 
-- **Validate timestamp sync with Music Assistant**: The timestamp sync code is implemented but untestable with the simple test server (no time sync protocol). Needs validation against a real Sendspin server.
+- **Cross-correlation sync validation**: The multi-stream onset measurement (116ms spread) reflects PTP warmup variance, not sync failure. True < 1ms validation needs audio content cross-correlation between captures.
 - **FLAC support**: When sendspin-rs gains FLAC decoding
 - **Drift compensation**: Sample insertion/dropping when fill deviates from target
 - **Prometheus metrics**: Production monitoring endpoint
