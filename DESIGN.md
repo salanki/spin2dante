@@ -77,12 +77,11 @@ The FlowsTransmitter may report "clock unavailable" until it receives its first 
 
 When a stream starts, the bridge writes audio to the ring buffer. But inferno reads at `(ptp_now - latency) % RING_BUFFER_SIZE` — a position determined by the PTP clock, not by our write position. If no subscriber has connected yet, or the PTP clock isn't available, the read and write positions are in different domains.
 
-WaitingForSubscriber monitors `read_pos` from `PositionReportDestination`. When `read_pos` starts advancing (subscriber connected + clock working), the bridge calls `snap_to_live()`:
-1. Zero-fill `[read_pos, read_pos + prebuffer_target)` — silence during prebuffer
-2. Set `write_pos = read_pos + prebuffer_target` — fresh audio lands right after
-3. Enter Prebuffering
+WaitingForSubscriber is designed to detect when a subscriber connects and the clock is working, then snap the write position to the read position. It monitors `read_pos` from `PositionReportDestination` and, when it advances, calls `snap_to_live()`.
 
-If `read_pos` doesn't advance within 5 seconds (clock may still be warming up), the bridge falls back to Prebuffering without snap-to-live alignment. This is a pragmatic degradation for environments where clock overlay propagation is slow.
+**In practice, snap_to_live never fires** because `ExternalBuffer::unconditional_read()` returns `true`, which causes inferno to skip `PositionReportDestination` updates (see [PositionReportDestination limitation](#positionreportdestination-limitation) below). The `read_pos` value is always 0.
+
+Instead, WaitingForSubscriber always hits its **5-second timeout** and falls back to Prebuffering without alignment. Audio still flows correctly — inferno reads from the ring at PTP-determined positions, and our continuous writes keep the ring populated. The alignment between write and read positions is not perfect but is sufficient for audio playback.
 
 ## State Machine
 

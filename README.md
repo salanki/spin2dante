@@ -77,7 +77,7 @@ DANTE uses PTP (Precision Time Protocol) to synchronize audio clocks across all 
 
 **PTPv1 (default — standard DANTE):** Statime runs as a PTPv1 **follower only**. An existing DANTE device on the network must be the clock master. This is the typical setup when you have DANTE amplifiers, receivers, or other hardware on the LAN — they provide the master clock.
 
-**PTPv2 (AES67 networks):** If you have no standard DANTE hardware but do have AES67-capable devices, you can switch Statime to PTPv2 mode. PTPv2 supports **master operation**, meaning Statime can act as the clock leader itself — no external PTP master needed. To enable this, change `protocol-version = "PTPv2"` in `statime/statime-docker.toml`. Note that PTPv2 interoperability with DANTE devices requires those devices to have AES67 enabled.
+**PTPv2 (AES67 networks or no DANTE hardware):** If you have no standard DANTE hardware, you can use PTPv2 mode with two Statime instances: one as **master** (clock reference) and one as **follower** (exports usrvclock for inferno). Only PTP followers export clock overlays — masters don't adjust their clock and never trigger the export callback. See `statime/statime-ptpv2-master.toml` and `statime/statime-ptpv2-follower.toml` for configs. Note that PTPv2 interoperability with DANTE devices requires those devices to have AES67 enabled.
 
 See the [Inferno clocking documentation](https://gitlab.com/lumifaza/inferno#clocking-options) for details.
 

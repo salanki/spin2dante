@@ -15,7 +15,7 @@ services:
     volumes:
       - shared:/shared
 
-  # PTPv2 master — exports clock via usrvclock
+  # PTPv2 master — clock reference, does NOT export usrvclock
   ptp-master:
     build:
       context: ../statime

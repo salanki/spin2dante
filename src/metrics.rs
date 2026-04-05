@@ -1,144 +1,74 @@
 use log::info;
 use std::time::Instant;
 
-/// Tracks jitter buffer health metrics for console logging.
+/// Tracks bridge activity metrics for console logging.
+///
+/// Note: inferno's ExternalBuffer::unconditional_read() means
+/// PositionReportDestination is never updated, so we cannot observe
+/// the actual read position or jitter buffer fill level. We only
+/// track write-side metrics.
 pub struct BufferMetrics {
     target_fill: usize,
-    min_fill: isize,
-    max_fill: isize,
-    underruns: u64,
-    overruns: u64,
-    /// Recent (timestamp, fill_level) pairs for drift estimation.
-    fill_history: Vec<(Instant, isize)>,
-    /// Tracks whether a DANTE subscriber is actively consuming audio.
-    last_read_pos: usize,
-    /// How many consecutive log intervals read_pos has been stalled.
-    stalled_intervals: u32,
-    /// Whether we've logged a "subscriber active" recovery message.
-    was_stalled: bool,
+    last_write_pos: usize,
+    last_log_time: Option<Instant>,
+    total_samples_written: u64,
+    start_time: Instant,
 }
 
 impl BufferMetrics {
     pub fn new(target_fill: usize) -> Self {
         Self {
             target_fill,
-            min_fill: isize::MAX,
-            max_fill: isize::MIN,
-            underruns: 0,
-            overruns: 0,
-            fill_history: Vec::new(),
-            last_read_pos: 0,
-            stalled_intervals: 0,
-            was_stalled: false,
+            last_write_pos: 0,
+            last_log_time: None,
+            total_samples_written: 0,
+            start_time: Instant::now(),
         }
     }
 
     pub fn reset(&mut self) {
-        self.min_fill = isize::MAX;
-        self.max_fill = isize::MIN;
-        self.underruns = 0;
-        self.overruns = 0;
-        self.fill_history.clear();
-        self.last_read_pos = 0;
-        self.stalled_intervals = 0;
-        self.was_stalled = false;
+        self.last_write_pos = 0;
+        self.last_log_time = None;
+        self.total_samples_written = 0;
+        self.start_time = Instant::now();
     }
 
-    /// Called on each audio write with current write and read positions.
-    pub fn update(&mut self, write_pos: usize, read_pos: usize) {
-        let fill = (write_pos as isize).wrapping_sub(read_pos as isize);
+    /// Called on each audio write.
+    pub fn update(&mut self, write_pos: usize, _read_pos: usize) {
+        let delta = write_pos.wrapping_sub(self.last_write_pos);
+        self.total_samples_written += delta as u64;
+        self.last_write_pos = write_pos;
+    }
 
-        if fill < self.min_fill {
-            self.min_fill = fill;
-        }
-        if fill > self.max_fill {
-            self.max_fill = fill;
-        }
-        if fill <= 0 {
-            self.underruns += 1;
-        }
-        if fill as usize > super::bridge::RING_BUFFER_SIZE - 1024 {
-            self.overruns += 1;
-        }
-
-        // Record fill level for drift estimation (keep last 60 entries)
+    /// Log metrics. Called periodically.
+    pub fn log(&mut self, write_pos: usize, _read_pos: usize) {
         let now = Instant::now();
-        self.fill_history.push((now, fill));
-        if self.fill_history.len() > 60 {
-            self.fill_history.remove(0);
-        }
-    }
+        let elapsed = now.duration_since(self.start_time).as_secs();
 
-    /// Log metrics to stderr. Called periodically.
-    pub fn log(&mut self, write_pos: usize, read_pos: usize) {
-        let fill = (write_pos as isize).wrapping_sub(read_pos as isize);
-
-        // Detect whether read_pos is advancing (subscriber active)
-        let read_advancing = read_pos != self.last_read_pos;
-        self.last_read_pos = read_pos;
-
-        if !read_advancing {
-            self.stalled_intervals += 1;
-        } else {
-            if self.was_stalled {
-                info!("[buffer] subscriber active; consumption resumed");
-                self.was_stalled = false;
+        // Calculate write rate over last interval
+        let rate_str = if let Some(last_time) = self.last_log_time {
+            let interval = now.duration_since(last_time).as_secs_f64();
+            let delta = write_pos.wrapping_sub(self.last_write_pos) as f64;
+            if interval > 0.0 {
+                let rate_hz = delta / interval;
+                format!("{:.0}Hz", rate_hz)
+            } else {
+                "n/a".to_string()
             }
-            self.stalled_intervals = 0;
-        }
-
-        if self.stalled_intervals >= 2 {
-            self.was_stalled = true;
-        }
-
-        let drift_ppm = self.estimate_drift_ppm();
-
-        let drift_str = match drift_ppm {
-            Some(d) => format!("{:+.1}ppm", d),
-            None => "n/a".to_string(),
+        } else {
+            "n/a".to_string()
         };
 
+        let total_sec = self.total_samples_written / super::bridge::SAMPLE_RATE as u64;
+
         info!(
-            "[buffer] fill={} target={} drift={} min={} max={} underruns={} overruns={}",
-            fill,
-            self.target_fill,
-            drift_str,
-            if self.min_fill == isize::MAX {
-                0
-            } else {
-                self.min_fill
-            },
-            if self.max_fill == isize::MIN {
-                0
-            } else {
-                self.max_fill
-            },
-            self.underruns,
-            self.overruns,
+            "[buffer] writing at {} | {}s total | target_buffer={}ms",
+            rate_str,
+            total_sec,
+            self.target_fill * 1000 / super::bridge::SAMPLE_RATE as usize,
         );
-    }
 
-    /// Estimate clock drift in ppm from fill level trend.
-    /// Positive = Sendspin faster than PTP, fill increasing.
-    /// Negative = Sendspin slower, fill decreasing.
-    fn estimate_drift_ppm(&self) -> Option<f64> {
-        if self.fill_history.len() < 10 {
-            return None;
-        }
-
-        let first = self.fill_history.first()?;
-        let last = self.fill_history.last()?;
-
-        let elapsed_secs = last.0.duration_since(first.0).as_secs_f64();
-        if elapsed_secs < 5.0 {
-            return None;
-        }
-
-        let fill_change = (last.1 - first.1) as f64;
-        let drift_samples_per_sec = fill_change / elapsed_secs;
-        let drift_ppm =
-            (drift_samples_per_sec / super::bridge::SAMPLE_RATE as f64) * 1_000_000.0;
-
-        Some(drift_ppm)
+        self.last_write_pos = write_pos;
+        self.last_log_time = Some(now);
     }
 }
