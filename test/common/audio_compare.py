@@ -4,15 +4,61 @@ import json
 import sys
 
 
+def is_nonzero_frame(capture: bytes, frame_start: int, frame_bytes: int) -> bool:
+    start_byte = frame_start * frame_bytes
+    frame = capture[start_byte:start_byte + frame_bytes]
+    return len(frame) == frame_bytes and any(frame)
+
+
+def try_match_window(reference: bytes, capture: bytes, frame_bytes: int, capture_start: int, window_frames: int):
+    start_byte = capture_start * frame_bytes
+    end_byte = start_byte + window_frames * frame_bytes
+    window = capture[start_byte:end_byte]
+    if len(window) < window_frames * frame_bytes:
+        return None
+
+    ref_byte = reference.find(window)
+    while ref_byte != -1 and (ref_byte % frame_bytes) != 0:
+        ref_byte = reference.find(window, ref_byte + 1)
+    if ref_byte != -1:
+        return capture_start, ref_byte // frame_bytes
+
+    return None
+
+
+def iter_candidate_starts(first_nonzero: int, max_start: int):
+    yielded = set()
+
+    # Search densely around the first audible region to keep the common case fast.
+    local_end = min(max_start, first_nonzero + 4096)
+    for step in (16, 1):
+        for capture_start in range(first_nonzero, local_end + 1, step):
+            if capture_start not in yielded:
+                yielded.add(capture_start)
+                yield capture_start
+
+    # If startup garbage exists before valid aligned audio, probe deeper into the capture
+    # at wider intervals so we can still find a later exact window without scanning every frame.
+    for step, limit in (
+        (256, min(max_start, first_nonzero + 65536)),
+        (1024, max_start),
+    ):
+        start = local_end + 1
+        if start > limit:
+            continue
+        for capture_start in range(start, limit + 1, step):
+            if capture_start not in yielded:
+                yielded.add(capture_start)
+                yield capture_start
+
+
 def find_alignment(reference: bytes, capture: bytes, frame_bytes: int, window_frames: int, probe_frames: int):
     capture_frames = len(capture) // frame_bytes
     max_start = min(max(capture_frames - window_frames, 0), probe_frames)
 
     first_nonzero = None
     for capture_start in range(max_start + 1):
-        start_byte = capture_start * frame_bytes
-        frame = capture[start_byte:start_byte + frame_bytes]
-        if len(frame) < frame_bytes or not any(frame):
+        if not is_nonzero_frame(capture, capture_start, frame_bytes):
             continue
         first_nonzero = capture_start
         break
@@ -20,39 +66,24 @@ def find_alignment(reference: bytes, capture: bytes, frame_bytes: int, window_fr
     if first_nonzero is None:
         return None, None
 
-    search_end = min(max_start, first_nonzero + 4096)
-    for capture_start in range(first_nonzero, search_end + 1, 16):
-        start_byte = capture_start * frame_bytes
-        end_byte = start_byte + window_frames * frame_bytes
-        window = capture[start_byte:end_byte]
-        if len(window) < window_frames * frame_bytes:
-            break
-
-        ref_byte = reference.find(window)
-        while ref_byte != -1 and (ref_byte % frame_bytes) != 0:
-            ref_byte = reference.find(window, ref_byte + 1)
-        if ref_byte != -1:
-            return capture_start, ref_byte // frame_bytes
-
-    for capture_start in range(first_nonzero, search_end + 1):
-        if (capture_start - first_nonzero) % 16 == 0:
+    for capture_start in iter_candidate_starts(first_nonzero, max_start):
+        if not is_nonzero_frame(capture, capture_start, frame_bytes):
             continue
-        start_byte = capture_start * frame_bytes
-        end_byte = start_byte + window_frames * frame_bytes
-        window = capture[start_byte:end_byte]
-        if len(window) < window_frames * frame_bytes:
-            break
-
-        ref_byte = reference.find(window)
-        while ref_byte != -1 and (ref_byte % frame_bytes) != 0:
-            ref_byte = reference.find(window, ref_byte + 1)
-        if ref_byte != -1:
-            return capture_start, ref_byte // frame_bytes
+        match = try_match_window(reference, capture, frame_bytes, capture_start, window_frames)
+        if match is not None:
+            return match
 
     return None, None
 
 
-def analyze(reference: bytes, capture: bytes, sample_rate: int, channels: int, min_run_seconds: float):
+def analyze(
+    reference: bytes,
+    capture: bytes,
+    sample_rate: int,
+    channels: int,
+    min_run_seconds: float,
+    probe_seconds: float,
+):
     frame_bytes = channels * 4
     if len(reference) < frame_bytes or len(capture) < frame_bytes:
         return {
@@ -66,7 +97,7 @@ def analyze(reference: bytes, capture: bytes, sample_rate: int, channels: int, m
         capture=capture,
         frame_bytes=frame_bytes,
         window_frames=64,
-        probe_frames=sample_rate * 10,
+        probe_frames=int(sample_rate * probe_seconds),
     )
     if capture_start is None:
         return {
@@ -136,6 +167,7 @@ def main() -> int:
     parser.add_argument("--sample-rate", type=int, default=48000)
     parser.add_argument("--channels", type=int, default=2)
     parser.add_argument("--min-run-seconds", type=float, default=5.0)
+    parser.add_argument("--probe-seconds", type=float, default=30.0)
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
 
@@ -144,7 +176,14 @@ def main() -> int:
     with open(args.capture, "rb") as capture_file:
         capture = capture_file.read()
 
-    result = analyze(reference, capture, args.sample_rate, args.channels, args.min_run_seconds)
+    result = analyze(
+        reference,
+        capture,
+        args.sample_rate,
+        args.channels,
+        args.min_run_seconds,
+        args.probe_seconds,
+    )
     result["label"] = args.label
 
     if args.json:
