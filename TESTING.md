@@ -326,14 +326,17 @@ Uses [Statime](https://github.com/teodly/statime/tree/inferno-dev) (a real PTP d
 
 ### How it works
 
-- Statime runs as PTPv2 leader (master) with `virtual-system-clock-base = "monotonic_raw"` and `hardware-clock = "none"` (software timestamps, no real NIC PTP)
+- Statime runs as PTPv2 follower with `virtual-system-clock-base = "monotonic_raw"`
+- It syncs against a PTP master (typically a DANTE device on the network)
 - It creates the usrvclock socket at `/shared/usrvclock` via `usrvclock-export = true`
 - All inferno containers read from this socket — same interface as the fake server
 - Statime needs `CAP_SYS_TIME` capability (granted via `cap_add` in compose)
 
-### First run
+### Requirements
 
-The Statime Docker image builds from source (~3-5 min on first run). Subsequent runs use the cached image.
+- **Real DANTE hardware** on the network acting as PTP master
+- **Host with a globally-administered MAC address** (bare metal, not VM/Docker)
+- The Statime Docker image builds from source (~3-5 min on first run)
 
 ```sh
 make test-ptp
@@ -342,22 +345,16 @@ make test-ptp
 ### Config file
 
 The Statime config is at `test/statime/statime-docker.toml`. Key settings:
-- `protocol-version = "PTPv2"` — PTPv2 for leader capability
-- `priority1 = 128` — become PTP master in the Docker network
+- `protocol-version = "PTPv2"` — PTPv2 protocol
+- `priority1 = 251` — high value = prefer to be PTP follower
 - `usrvclock-export = true` — export clock via usrvclock protocol
 - `usrvclock-path = "/shared/usrvclock"` — socket on shared volume
-- `hardware-clock = "none"` — software timestamps (no real PTP hardware in Docker)
-- `interface = "eth0"` — Docker's default interface
+- `hardware-clock = "auto"` — auto-detect hardware timestamping
+- `interface = "eth0"` — auto-detected by entrypoint script
 
-### Current status: requires real DANTE hardware
+### Why this doesn't work in pure Docker
 
-The `make test-ptp` infrastructure is complete but **does not yet pass in a pure Docker environment**. Two issues:
-
-1. **Statime identity bug** (fixed in our Dockerfile via `sed`): `unwrap_or` evaluates `get_clock_id()` eagerly even when `identity` is configured, panicking on Docker/VM locally-administered MACs. Our Dockerfile patches this to `unwrap_or_else`.
-
-2. **Standalone master doesn't export overlays**: Statime as a PTP master with no followers has nothing to synchronize against, so it never calls the usrvclock overlay export callback after the initial clock step. This means inferno's FlowsTransmitter never receives a valid clock overlay. The fake_usrvclock_server avoids this by sending periodic overlays unconditionally (every 1 second via `select` timeout).
-
-**Bottom line**: Real PTP testing requires actual DANTE devices on the network for Statime to sync against. For CI/Docker-only testing, `make test` (with fake clock) is the correct path — it validates the bridge logic without requiring real PTP synchronization.
+A standalone PTP master with no followers never exports clock overlays via usrvclock — it has nothing to synchronize against. The fake_usrvclock_server used by `make test` avoids this by sending unconditional periodic updates. For CI/Docker-only testing, `make test` is the correct path.
 
 ## Known Limitations
 
