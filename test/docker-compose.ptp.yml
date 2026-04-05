@@ -21,7 +21,7 @@ services:
   # Real PTP clock source using Statime
   statime:
     build:
-      context: ./statime
+      context: ../statime
     volumes:
       - shared:/shared
     networks:
