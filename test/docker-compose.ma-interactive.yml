@@ -23,14 +23,17 @@ networks:
     driver: bridge
 
 services:
-  # Fake PTP clock
+  # Statime PTPv2 master — real PTP clock, no hardware needed
   clock:
     build:
-      context: ../../inferno/test/dockerized_trx/fake_usrvclock_server
+      context: ../statime
+    cap_add:
+      - SYS_TIME
     environment:
-      USRVCLOCK_SOCKET: /shared/usrvclock
+      STATIME_CONFIG: /etc/statime-ptpv2-master.toml
     volumes:
       - shared:/shared
+      - ../statime/statime-ptpv2-master.toml:/etc/statime-ptpv2-master.toml:ro
     networks:
       - dante_net
     depends_on:

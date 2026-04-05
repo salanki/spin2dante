@@ -1,0 +1,28 @@
+# Statime PTPv2 MASTER configuration for localhost testing.
+#
+# Runs as PTP master (clock leader) using software timestamps.
+# No real DANTE hardware needed — Statime IS the clock source.
+# Exports clock to spin2dante bridges via usrvclock.
+
+loglevel = "info"
+
+sdo-id = 0
+domain = 0
+priority1 = 128   # low = prefer to be PTP master
+priority2 = 128
+
+virtual-system-clock = true
+virtual-system-clock-base = "monotonic_raw"
+
+# Manual identity — avoids get_clock_id panic on VMs/Docker
+identity = "0000000000000001"
+
+# Master does NOT export usrvclock — only followers adjust their clock
+# and have overlays to export
+usrvclock-export = false
+
+[[port]]
+interface = "eth0"              # patched by entrypoint.sh from $PTP_INTERFACE
+network-mode = "ipv4"
+hardware-clock = "none"         # software timestamps only
+protocol-version = "PTPv2"      # PTPv2 supports master operation

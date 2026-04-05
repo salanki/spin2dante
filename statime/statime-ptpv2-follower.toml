@@ -1,0 +1,26 @@
+# Statime PTPv2 FOLLOWER for testing.
+# Syncs to the PTPv2 master, does NOT export usrvclock.
+# Just creates PTP sync traffic so the master's overlay callback fires.
+
+loglevel = "info"
+
+sdo-id = 0
+domain = 0
+priority1 = 255   # highest = always be follower
+priority2 = 255
+
+virtual-system-clock = true
+virtual-system-clock-base = "tai"
+
+# Manual identity — different from master
+identity = "0000000000000002"
+
+# Follower exports usrvclock — it's the one that adjusts its clock
+usrvclock-export = true
+usrvclock-path = "/shared/usrvclock"
+
+[[port]]
+interface = "eth0"
+network-mode = "ipv4"
+hardware-clock = "none"
+protocol-version = "PTPv2"
