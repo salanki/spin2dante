@@ -59,7 +59,7 @@ Notes:
 # Single-stream E2E test (1 bridge, 1 receiver)
 make test
 
-# Multi-stream E2E test (4 bridges in one Sendspin group, 4 receivers)
+# Multi-stream E2E test (16 bridges in one Sendspin group, 16 receivers)
 make test-multi
 
 # Override inferno location if needed
@@ -70,7 +70,7 @@ The Makefile handles building the bridge image, the inferno2pipe image (with sub
 
 ## Test Architecture
 
-Six Docker containers on a shared bridge network:
+Seven Docker containers on a shared bridge network (single-stream test):
 
 ```
 ┌──────────────┐  ┌──────────────────┐  ┌───────────────┐

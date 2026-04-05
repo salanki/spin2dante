@@ -81,12 +81,13 @@ The DANTE device (DeviceServer + TX) is started **once at process startup** and 
 
 ### WaitingForSubscriber and timeout fallback
 
-When a stream starts, the bridge writes audio via `RBInput::write_from_at()`. It monitors `current_timestamp` to detect when the FlowsTransmitter is operating:
+When a stream starts, the bridge writes audio via `RBInput::write_from_at()`. It monitors `read_position` (the true consumer cursor from the FlowsTransmitter) to detect when reading begins:
 
-- If `current_timestamp` changes from `usize::MAX` → snap_to_live()
+- If `read_position` becomes valid (non-zero, non-MAX) → snap_to_live()
+- If write/read domain misalignment detected (distance > ring buffer size) → snap_to_live() immediately
 - If no change within 5 seconds → fall back to Prebuffering without alignment
 
-The timeout fallback is pragmatic for environments where the PTP clock takes time to propagate to the FlowsTransmitter.
+The auto-realignment handles PTP clock warmup: the bridge starts writing at local domain 0, then snaps to the PTP domain once `read_position` shows where inferno is actually reading.
 
 ## State Machine
 
@@ -143,18 +144,16 @@ Lossless and bit-perfect for PCM.
 
 ## Jitter Buffer Monitoring
 
-The bridge approximates buffer fill from `write_pos - current_timestamp`. When `current_timestamp` is valid (not `usize::MAX`), metrics show:
+The bridge computes buffer fill from `write_pos - read_position`, where `read_position` is the true consumer cursor from the FlowsTransmitter (exposed via the inferno fork). When `read_position` is valid:
 
 ```
-[buffer] fill=2412 target=2400 drift=+1.2ppm write_pos=... read_pos=...
+[buffer] fill=4128 target=2400 drift=+133.3ppm write_pos=140477176352 read_pos=140477172224
 ```
 
-When `current_timestamp` is not yet available:
+When `read_position` is not yet available (PTP clock warming up):
 ```
 [buffer] writing at N samples (read_pos not yet available)
 ```
-
-**Note**: Fill and drift are approximate because `current_timestamp` is `min_next_ts`, not the actual ring read position. True buffer occupancy requires exposing the consumer cursor from the FlowsTransmitter (planned inferno fork enhancement).
 
 ## PTP Clock Chain
 
@@ -210,7 +209,7 @@ The owned buffer path provides:
 - Hole detection and fill via `hole_fix_wait`
 - Configurable TX dithering, with spin2dante explicitly disabling the 24-bit path so PCM payloads can be validated bit-for-bit over the received overlap
 
-The fork exposes the consumer-side read position, and the bridge uses that real cursor instead of approximating from `current_timestamp`.
+The fork exposes `read_position` — the actual `start_ts` the FlowsTransmitter uses for ring reads. The bridge uses this for snap_to_live alignment and buffer metrics.
 
 ## Lessons Learned
 
@@ -233,7 +232,7 @@ Inferno uses `friendly_hostname` from the `NAME` config key (our `--name` arg). 
 
 ## Future Work
 
-- **True consumer position**: Expose `start_ts` or `timestamp_shift` from FlowsTransmitter so the bridge can write at PTP-domain positions
+- **Sendspin timestamp sync**: Use per-chunk timestamps for cross-bridge synchronization
 - **FLAC support**: When sendspin-rs gains FLAC decoding
 - **Drift compensation**: Sample insertion/dropping when fill deviates from target
 - **Prometheus metrics**: Production monitoring endpoint
