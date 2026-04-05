@@ -401,15 +401,37 @@ impl SendspinBridge {
 
         self.write_pos = self.write_pos.wrapping_add(frames);
 
+        // Check if read_pos became valid and we need to realign.
+        // This handles the case where the PTP clock takes time to warm up:
+        // we may have started writing at local domain 0, but now read_pos
+        // shows the actual PTP-domain position the FlowsTransmitter reads from.
+        let read_pos = self.get_read_pos();
+        if read_pos != 0 {
+            let distance = if self.write_pos > read_pos {
+                self.write_pos - read_pos
+            } else {
+                read_pos - self.write_pos
+            };
+            // If write_pos is way out of alignment (more than ring buffer apart),
+            // snap to live regardless of current state
+            if distance > RING_BUFFER_SIZE {
+                info!(
+                    "write/read misalignment detected (write_pos={}, read_pos={}, distance={}), snapping to live",
+                    self.write_pos, read_pos, distance
+                );
+                self.snap_to_live();
+                return;
+            }
+        }
+
         // WaitingForSubscriber: check if read_pos started advancing
         if self.state == BridgeState::WaitingForSubscriber {
-            let read_pos = self.get_read_pos();
             if read_pos != self.last_read_pos && read_pos != 0 {
                 info!("subscriber detected (read_pos={}), snapping to live", read_pos);
                 self.waiting_since = None;
                 self.snap_to_live();
             } else if self.waiting_since.map_or(false, |t| t.elapsed().as_secs() >= 5) {
-                info!("subscriber wait timed out (5s), entering prebuffering");
+                info!("subscriber wait timed out (5s), entering prebuffering without alignment");
                 self.waiting_since = None;
                 self.prebuffer_written = 0;
                 self.state = BridgeState::Prebuffering;
@@ -424,7 +446,6 @@ impl SendspinBridge {
             self.prebuffer_written += frames;
             if self.prebuffer_written >= self.prebuffer_target {
                 self.state = BridgeState::Running;
-                let read_pos = self.get_read_pos();
                 let fill = self.write_pos.wrapping_sub(read_pos) as isize;
                 info!(
                     "prebuffer complete ({} samples), fill={}, read_pos={}, now transmitting",
