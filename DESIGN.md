@@ -36,7 +36,33 @@ Sendspin Server (Music Assistant)
 
 The bridge uses a fork of inferno_aoip that adds `transmit_from_owned_buffer()` — a method that creates owned ring buffers with proper `readable_pos` tracking and returns `RBInput` write handles to the caller.
 
-## Clock Model
+## Two-Layer Sync Architecture
+
+The bridge uses two independent sync mechanisms:
+
+1. **PTP/DANTE layer**: determines WHERE in the ring buffer audio lands (PTP-domain positions)
+2. **Sendspin timestamp layer**: determines WHICH audio chunk corresponds to "now" (cross-bridge convergence)
+
+### Sendspin Timestamp Sync
+
+Each `AudioChunk` carries a presentation timestamp (`timestamp: i64`, server clock microseconds — "when the first sample should be output"). When `ClockSync` is synchronized, the bridge maps each chunk to a specific ring buffer position:
+
+```
+anchor_ring_pos = read_position + prebuffer_target
+target = anchor_ring_pos + (chunk.timestamp - anchor_server_us) * SAMPLE_RATE / 1_000_000
+```
+
+This ensures all bridges receiving the same Sendspin stream write the same audio at the same ring positions (same Sendspin timestamps → same delta → same target). Cross-bridge sync target: < 1ms (< 48 samples).
+
+**Chunk decisions** (ring position is the truth):
+- `target + frames ≤ read_pos` → drop (entirely consumed)
+- `target < read_pos < target + frames` → trim stale prefix, write remainder
+- `target far ahead of write frontier` → re-anchor (intentional discontinuity)
+- Otherwise → write at target
+
+**Fallback**: if `ClockSync` hasn't converged (e.g., test server without time sync), the bridge writes sequentially at `write_pos` — same behavior as before, no sync.
+
+## PTP Clock Model
 
 ### Overview
 
@@ -232,7 +258,7 @@ Inferno uses `friendly_hostname` from the `NAME` config key (our `--name` arg). 
 
 ## Future Work
 
-- **Sendspin timestamp sync**: Use per-chunk timestamps for cross-bridge synchronization
+- **Validate timestamp sync with Music Assistant**: The timestamp sync code is implemented but untestable with the simple test server (no time sync protocol). Needs validation against a real Sendspin server.
 - **FLAC support**: When sendspin-rs gains FLAC decoding
 - **Drift compensation**: Sample insertion/dropping when fill deviates from target
 - **Prometheus metrics**: Production monitoring endpoint
