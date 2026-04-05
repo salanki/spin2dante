@@ -1,5 +1,8 @@
 # spin2dante
 
+> **Warning**
+> This project is experimental and largely untested on real hardware. Use at your own risk.
+
 Bridge [Sendspin](https://www.sendspin-audio.com/) audio streams to [DANTE](https://www.getdante.com/) network audio receivers.
 
 The primary use case is connecting DANTE-compatible audio devices (amplifiers, receivers, DSPs) to music streamers — in particular [Music Assistant](https://www.music-assistant.io/). Each bridge instance appears as a Sendspin player in Music Assistant and as a DANTE transmitter on the network. You subscribe your DANTE receivers to the bridge's output channels using Dante Controller or `netaudio`. This gives you synchronized multi-room group playback across DANTE zones, controlled from Music Assistant.
