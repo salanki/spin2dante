@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-STREAM_COUNT=4
+STREAM_COUNT=16
 RECORD_SECS=20
 
 echo "=== spin2dante Multi-Stream E2E Test (${STREAM_COUNT} streams) ==="
