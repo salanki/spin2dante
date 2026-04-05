@@ -119,6 +119,7 @@ Each bridge instance is configured via CLI arguments and environment variables.
 | `--url` / `-u` | (required) | Sendspin server WebSocket URL |
 | `--name` / `-n` | "Sendspin Bridge" | DANTE device name visible on the network |
 | `--buffer-ms` | 50 | Jitter buffer size in milliseconds |
+| `--client-id` | Derived from name | Stable Sendspin/Music Assistant player identity |
 
 ### Environment Variables
 
@@ -170,6 +171,11 @@ Each bridge needs:
 - **Unique `TMPDIR` subdirectory** — for usrvclock client socket isolation (see below)
 - **Unique `INFERNO_PROCESS_ID`** — identifies the instance (device ID is auto-derived from host IP + process ID)
 - **Unique `INFERNO_ALT_PORT`** — base UDP port for DANTE protocol (space 10 apart: 14000, 14010, 14020, ...)
+
+For Music Assistant / Sendspin player identity:
+- **Stable `--client-id`** keeps the same player across restarts
+- If omitted, spin2dante derives a stable ID from `--name` and `INFERNO_PROCESS_ID` when present
+- Changing `--name` or `INFERNO_PROCESS_ID` changes the derived player identity
 
 ### Why TMPDIR must be unique and on a shared volume
 

@@ -171,6 +171,7 @@ struct StreamFormat {
 pub struct SendspinBridge {
     url: String,
     device_name: String,
+    client_id: String,
     buffer_ms: u32,
     state: BridgeState,
     // Device + TX state (persistent for process lifetime)
@@ -188,11 +189,12 @@ pub struct SendspinBridge {
 }
 
 impl SendspinBridge {
-    pub fn new(url: String, device_name: String, buffer_ms: u32) -> Self {
+    pub fn new(url: String, device_name: String, buffer_ms: u32, client_id: String) -> Self {
         let prebuffer_target = (SAMPLE_RATE as usize * buffer_ms as usize) / 1000;
         Self {
             url,
             device_name,
+            client_id,
             buffer_ms,
             state: BridgeState::Idle,
             ring_buffer: None,
@@ -272,7 +274,7 @@ impl SendspinBridge {
         let client = loop {
             info!("connecting to Sendspin server at {}", self.url);
             match ProtocolClientBuilder::builder()
-                .client_id(uuid_simple())
+                .client_id(self.client_id.clone())
                 .name(self.device_name.clone())
                 .product_name(Some("spin2dante".to_string()))
                 .manufacturer(Some("spin2dante".to_string()))
@@ -531,13 +533,4 @@ impl SendspinBridge {
         self.state = BridgeState::Idle;
         info!("bridge shutdown complete");
     }
-}
-
-fn uuid_simple() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let t = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    format!("bridge-{:x}", t)
 }
