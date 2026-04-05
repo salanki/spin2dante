@@ -40,26 +40,20 @@ jobs:
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo dpkg --add-architecture arm64
-          sudo python3 - <<'PY'
-          from pathlib import Path
-          path = Path("/etc/apt/sources.list.d/ubuntu.sources")
-          text = path.read_text()
-          blocks = []
-          for block in text.strip().split("\n\n"):
-              if "Architectures:" not in block:
-                  block = f"{block}\nArchitectures: amd64"
-              blocks.append(block)
-          path.write_text("\n\n".join(blocks) + "\n")
-          PY
-          sudo tee /etc/apt/sources.list.d/ubuntu-arm64.sources >/dev/null <<'EOF'
-          Types: deb
-          URIs: http://ports.ubuntu.com/ubuntu-ports
-          Suites: noble noble-updates noble-backports noble-security
-          Components: main restricted universe multiverse
-          Architectures: arm64
-          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          sudo mkdir -p /tmp/spin2dante-cross-apt
+          cat <<'EOF' | sudo tee /tmp/spin2dante-cross-apt/ubuntu-amd64.list >/dev/null
+          deb [arch=amd64] http://archive.ubuntu.com/ubuntu noble main restricted universe multiverse
+          deb [arch=amd64] http://archive.ubuntu.com/ubuntu noble-updates main restricted universe multiverse
+          deb [arch=amd64] http://archive.ubuntu.com/ubuntu noble-backports main restricted universe multiverse
+          deb [arch=amd64] http://security.ubuntu.com/ubuntu noble-security main restricted universe multiverse
           EOF
-          sudo apt-get update
+          cat <<'EOF' | sudo tee /tmp/spin2dante-cross-apt/ubuntu-arm64.list >/dev/null
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble main restricted universe multiverse
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-updates main restricted universe multiverse
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-backports main restricted universe multiverse
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-security main restricted universe multiverse
+          EOF
+          sudo apt-get             -o Dir::Etc::sourcelist=/dev/null             -o Dir::Etc::sourceparts=/tmp/spin2dante-cross-apt             -o APT::Get::List-Cleanup=0             update
 
       - name: Install system dependencies
         if: matrix.target != 'aarch64-unknown-linux-gnu'
@@ -67,7 +61,8 @@ jobs:
 
       - name: Install cross-compilation dependencies
         if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: sudo apt-get install -y ${{ matrix.apt_packages }}
+        run: |
+          sudo apt-get             -o Dir::Etc::sourcelist=/dev/null             -o Dir::Etc::sourceparts=/tmp/spin2dante-cross-apt             install -y ${{ matrix.apt_packages }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
