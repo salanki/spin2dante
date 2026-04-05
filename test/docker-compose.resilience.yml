@@ -15,18 +15,37 @@ services:
     volumes:
       - shared:/shared
 
-  clock_source:
+  ptp-master:
     build:
-      context: ../../inferno/test/dockerized_trx/fake_usrvclock_server
+      context: ../statime
+    cap_add:
+      - SYS_TIME
     environment:
-      - USRVCLOCK_SOCKET=/shared/usrvclock
+      STATIME_CONFIG: /etc/statime-ptpv2-master.toml
     volumes:
       - shared:/shared
+      - ../statime/statime-ptpv2-master.toml:/etc/statime-ptpv2-master.toml:ro
     networks:
       - audio_net
     depends_on:
       init:
         condition: service_completed_successfully
+
+  ptp-follower:
+    build:
+      context: ../statime
+    cap_add:
+      - SYS_TIME
+    environment:
+      STATIME_CONFIG: /etc/statime-ptpv2-follower.toml
+    volumes:
+      - shared:/shared
+      - ../statime/statime-ptpv2-follower.toml:/etc/statime-ptpv2-follower.toml:ro
+    networks:
+      - audio_net
+    depends_on:
+      ptp-master:
+        condition: service_started
 
   # Custom test server that runs scripted resilience scenarios
   test_server:
@@ -61,7 +80,7 @@ services:
       memlock: 200000000
     shm_size: 200m
     depends_on:
-      clock_source:
+      ptp-follower:
         condition: service_started
       test_server:
         condition: service_started
