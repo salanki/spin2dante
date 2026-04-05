@@ -9,7 +9,6 @@ startup: system
 boot: auto
 init: false
 host_network: true
-legacy: true
 arch:
   - aarch64
   - amd64

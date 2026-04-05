@@ -9,7 +9,6 @@ startup: application
 boot: auto
 init: false
 host_network: true
-legacy: true
 realtime: true
 arch:
   - aarch64
