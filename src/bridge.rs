@@ -19,20 +19,22 @@ pub const SAMPLE_RATE: u32 = 48000;
 const METRICS_INTERVAL_SECS: u64 = 5;
 
 // ─── Bridge state machine ───────────────────────────────────────────
+//
+// Device + TX alive in ALL states (except before start_device).
+// States only control what audio is in the ring buffer.
 
 #[derive(Debug, Clone, PartialEq)]
 enum BridgeState {
-    /// No stream active, DANTE device may or may not be running.
+    /// Device + TX alive. Ring is explicitly zeroed (silence).
     Idle,
-    /// Receiving audio into ring buffer, but no subscriber yet.
-    /// Audio is written as a circular scratch buffer. When a subscriber
-    /// appears (read_pos starts advancing), we snap to live and prebuffer.
+    /// Stream active, writing discardable scratch audio to ring.
+    /// Waiting for read_pos to advance (subscriber + clock ready).
     WaitingForSubscriber,
     /// Subscriber detected, filling jitter buffer with fresh audio.
     Prebuffering,
-    /// Actively transmitting, subscriber consuming audio.
+    /// Actively transmitting live audio to subscriber.
     Running,
-    /// Stream was cleared (seek/config change), realigning to live.
+    /// Stream cleared (seek), realigning to live position.
     Rebuffering,
 }
 
@@ -41,9 +43,7 @@ enum BridgeState {
 struct AudioRingBuffer {
     buffers: Vec<Vec<Atomic<i32>>>,
     valid: Arc<RwLock<bool>>,
-    /// Monotonically increasing write position (wraps via modulo on access).
     write_pos: usize,
-    /// PositionReportDestination table — inferno reports read position here.
     pos_report_tab: Arc<Vec<AtomicUsize>>,
 }
 
@@ -139,6 +139,16 @@ impl AudioRingBuffer {
         }
     }
 
+    /// Zero the entire ring buffer. Used on StreamEnd and reconnect
+    /// to ensure no stale audio loops via unconditional_read().
+    fn zero_all(&mut self) {
+        for ch in 0..CHANNELS {
+            for i in 0..RING_BUFFER_SIZE {
+                self.buffers[ch][i].store(0, Ordering::Release);
+            }
+        }
+    }
+
     fn invalidate(&self) {
         if let Ok(mut v) = self.valid.write() {
             *v = false;
@@ -163,15 +173,18 @@ pub struct SendspinBridge {
     device_name: String,
     buffer_ms: u32,
     state: BridgeState,
+    // Device + TX state (persistent for process lifetime)
     ring_buffer: Option<AudioRingBuffer>,
     device_server: Option<DeviceServer>,
+    current_timestamp: Arc<AtomicUsize>,
+    // Stream state (reset per stream)
     prebuffer_target: usize,
     prebuffer_written: usize,
-    current_timestamp: Arc<AtomicUsize>,
     stream_format: Option<StreamFormat>,
     metrics: BufferMetrics,
-    /// Tracks last observed read_pos for subscriber detection.
     last_read_pos: usize,
+    /// When WaitingForSubscriber started (for timeout fallback).
+    waiting_since: Option<std::time::Instant>,
 }
 
 impl SendspinBridge {
@@ -184,30 +197,75 @@ impl SendspinBridge {
             state: BridgeState::Idle,
             ring_buffer: None,
             device_server: None,
+            current_timestamp: Arc::new(AtomicUsize::new(usize::MAX)),
             prebuffer_target,
             prebuffer_written: 0,
-            current_timestamp: Arc::new(AtomicUsize::new(usize::MAX)),
             stream_format: None,
             metrics: BufferMetrics::new(prebuffer_target),
             last_read_pos: 0,
+            waiting_since: None,
         }
     }
 
     pub async fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Outer reconnect loop — recovers from websocket disconnects
+        // Start DANTE device + TX once for the entire process lifetime.
+        // This blocks until the PTP clock is available.
+        self.start_device().await;
+
+        // Outer reconnect loop for Sendspin
         loop {
             match self.run_session().await {
                 Ok(()) => {
                     info!("session ended cleanly (ctrl-c), exiting");
+                    self.shutdown().await;
                     return Ok(());
                 }
                 Err(e) => {
                     warn!("session ended with error: {e}, reconnecting in 2s...");
-                    self.stop_transmitter().await;
+                    self.enter_idle();
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 }
             }
         }
+    }
+
+    /// Start DANTE device and TX. Called once at process startup.
+    /// Blocks until PTP clock is available.
+    async fn start_device(&mut self) {
+        let mut ring_buffer = AudioRingBuffer::new();
+        ring_buffer.zero_all(); // start silent
+        let params = ring_buffer.as_external_params();
+
+        let short_name = self.device_name.chars().take(14).collect::<String>();
+        let mut config = std::collections::BTreeMap::new();
+        config.insert("NAME".to_string(), self.device_name.clone());
+        let mut settings = Settings::new(&self.device_name, &short_name, None, &config);
+        settings.make_tx_channels(CHANNELS);
+        settings.make_rx_channels(0);
+
+        info!("starting DANTE device: {} (waiting for PTP clock...)", self.device_name);
+        let mut server = DeviceServer::start(settings).await;
+        info!("DANTE device started, clock ready");
+
+        let (start_tx, start_rx) = oneshot::channel();
+        self.current_timestamp
+            .store(usize::MAX, std::sync::atomic::Ordering::SeqCst);
+
+        server
+            .transmit_from_external_buffer(
+                params,
+                start_rx,
+                self.current_timestamp.clone(),
+                None,
+            )
+            .await;
+
+        info!("FlowsTransmitter started (start_time=0, idle with silence)");
+        let _ = start_tx.send(0);
+
+        self.ring_buffer = Some(ring_buffer);
+        self.device_server = Some(server);
+        self.state = BridgeState::Idle;
     }
 
     async fn run_session(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -242,7 +300,7 @@ impl SendspinBridge {
             tokio::select! {
                 msg = messages.recv() => {
                     match msg {
-                        Some(msg) => self.handle_message(msg).await,
+                        Some(msg) => self.handle_message(msg),
                         None => return Err("Sendspin connection closed".into()),
                     }
                 }
@@ -257,14 +315,13 @@ impl SendspinBridge {
                 }
                 _ = tokio::signal::ctrl_c() => {
                     info!("shutting down");
-                    self.shutdown().await;
                     return Ok(());
                 }
             }
         }
     }
 
-    async fn handle_message(&mut self, msg: Message) {
+    fn handle_message(&mut self, msg: Message) {
         match msg {
             Message::StreamStart(start) => {
                 if let Some(player) = start.player {
@@ -279,63 +336,54 @@ impl SendspinBridge {
                         format.codec, format.sample_rate, format.channels, format.bit_depth
                     );
 
-                    // Enforce all format requirements up front
                     if format.sample_rate != SAMPLE_RATE {
-                        error!(
-                            "rejecting stream: sample rate {}Hz, requires {}Hz",
-                            format.sample_rate, SAMPLE_RATE
-                        );
+                        error!("rejecting stream: sample rate {}Hz, requires {}Hz", format.sample_rate, SAMPLE_RATE);
                         return;
                     }
                     if format.channels != CHANNELS as u8 {
-                        error!(
-                            "rejecting stream: {} channels, requires {} (stereo)",
-                            format.channels, CHANNELS
-                        );
+                        error!("rejecting stream: {} channels, requires {} (stereo)", format.channels, CHANNELS);
                         return;
                     }
                     if format.codec != "pcm" {
-                        error!(
-                            "rejecting stream: codec '{}', only 'pcm' supported",
-                            format.codec
-                        );
+                        error!("rejecting stream: codec '{}', only 'pcm' supported", format.codec);
                         return;
                     }
                     if format.bit_depth != 16 && format.bit_depth != 24 {
-                        error!(
-                            "rejecting stream: PCM bit depth {}, only 16 or 24 supported",
-                            format.bit_depth
-                        );
+                        error!("rejecting stream: PCM bit depth {}, only 16 or 24 supported", format.bit_depth);
                         return;
                     }
 
-                    // If DANTE device already running with same format,
-                    // treat as a stream boundary (clear + rebuffer).
-                    if self.device_server.is_some() && self.stream_format.as_ref() == Some(&format)
+                    // If already running with same format, treat as stream boundary
+                    if self.state == BridgeState::Running
+                        && self.stream_format.as_ref() == Some(&format)
                     {
                         info!("stream/start with same format: clearing and rebuffering");
-                        self.stream_format = Some(format);
                         self.clear_and_rebuffer();
                         return;
                     }
 
-                    // Format changed or first start — full device restart
-                    if self.device_server.is_some() {
-                        info!("stream format changed, restarting DANTE device");
-                        self.stop_transmitter().await;
-                    }
-
                     self.stream_format = Some(format);
-                    self.start_transmitter().await;
+
+                    // Check if subscriber is already active (pre-existing subscription)
+                    let read_pos = self.ring_buffer.as_ref().map_or(0, |rb| rb.read_pos());
+                    if read_pos != 0 && read_pos != self.last_read_pos {
+                        info!("subscriber already active (read_pos={}), snapping to live", read_pos);
+                        self.snap_to_live();
+                    } else {
+                        self.state = BridgeState::WaitingForSubscriber;
+                        self.last_read_pos = read_pos;
+                        self.waiting_since = Some(std::time::Instant::now());
+                        self.metrics.reset();
+                        info!("waiting for DANTE subscriber...");
+                    }
                 }
             }
             Message::StreamEnd(_) => {
-                info!("stream ended, stopping transmitter");
-                self.stop_transmitter().await;
-                info!("state transition -> Idle");
+                info!("stream ended, entering idle (device stays on network)");
+                self.enter_idle();
             }
             Message::StreamClear(_) => {
-                info!("stream cleared, discarding buffered audio and entering rebuffer mode");
+                info!("stream cleared, discarding buffered audio");
                 self.clear_and_rebuffer();
             }
             _ => {
@@ -344,59 +392,26 @@ impl SendspinBridge {
         }
     }
 
-    async fn start_transmitter(&mut self) {
-        let ring_buffer = AudioRingBuffer::new();
-        let params = ring_buffer.as_external_params();
-
-        let short_name = self.device_name.chars().take(14).collect::<String>();
-        let mut config = std::collections::BTreeMap::new();
-        config.insert("NAME".to_string(), self.device_name.clone());
-        let mut settings =
-            Settings::new(&self.device_name, &short_name, None, &config);
-        settings.make_tx_channels(CHANNELS);
-        settings.make_rx_channels(0);
-
-        info!("starting DANTE device: {}", self.device_name);
-        let mut server = DeviceServer::start(settings).await;
-
-        let (start_tx, start_rx) = oneshot::channel();
-        self.current_timestamp
-            .store(usize::MAX, std::sync::atomic::Ordering::SeqCst);
-
-        server
-            .transmit_from_external_buffer(
-                params,
-                start_rx,
-                self.current_timestamp.clone(),
-                None,
-            )
-            .await;
-
-        info!("starting FlowsTransmitter (start_time=0)");
-        let _ = start_tx.send(0);
-
-        self.ring_buffer = Some(ring_buffer);
-        self.device_server = Some(server);
+    /// Enter idle: zero ring, reset stream state. Device + TX stay alive.
+    fn enter_idle(&mut self) {
+        if let Some(rb) = &mut self.ring_buffer {
+            rb.zero_all();
+        }
+        self.stream_format = None;
+        self.prebuffer_written = 0;
         self.last_read_pos = 0;
-
-        // Enter WaitingForSubscriber — audio goes into ring buffer as scratch
-        // until a DANTE subscriber appears and read_pos starts advancing.
-        self.state = BridgeState::WaitingForSubscriber;
+        self.state = BridgeState::Idle;
         self.metrics.reset();
-        info!("waiting for DANTE subscriber...");
     }
 
     /// Snap write_pos to live position and enter prebuffering.
-    /// Called when a subscriber is first detected (read_pos starts moving).
     fn snap_to_live(&mut self) {
         if let Some(rb) = &mut self.ring_buffer {
             let read_pos = rb.read_pos();
-            // Zero-fill the jitter buffer region ahead of where inferno is reading
             rb.zero_range(read_pos, self.prebuffer_target);
-            // Set write_pos so fresh audio lands right after the zeroed region
             rb.write_pos = read_pos.wrapping_add(self.prebuffer_target);
             info!(
-                "subscriber detected: snapping to live, read_pos={}, write_pos={}",
+                "snapped to live: read_pos={}, write_pos={}",
                 read_pos, rb.write_pos
             );
         }
@@ -428,15 +443,8 @@ impl SendspinBridge {
     fn handle_audio(&mut self, chunk: AudioChunk) {
         let format = match &self.stream_format {
             Some(f) => f.clone(),
-            None => {
-                warn!("received audio before StreamStart, dropping");
-                return;
-            }
+            None => return, // Idle or no format — drop silently
         };
-
-        if self.state == BridgeState::Idle {
-            return;
-        }
 
         let rb = match &mut self.ring_buffer {
             Some(rb) => rb,
@@ -449,16 +457,26 @@ impl SendspinBridge {
             _ => 0,
         };
 
-        // Check for subscriber arrival in WaitingForSubscriber state
+        // In WaitingForSubscriber, check if read_pos started advancing.
+        // If the clock never becomes available (common in Docker with fake clock),
+        // fall back to Prebuffering after a timeout so audio still flows.
         if self.state == BridgeState::WaitingForSubscriber {
             let read_pos = self.ring_buffer.as_ref().unwrap().read_pos();
             if read_pos != self.last_read_pos && read_pos != 0 {
-                // read_pos is advancing — a subscriber connected!
+                // Subscriber active + clock working — snap to live
+                info!("subscriber detected (read_pos={}), snapping to live", read_pos);
+                self.waiting_since = None;
                 self.snap_to_live();
-                return; // snap_to_live resets write_pos, skip further processing this chunk
+            } else if self.waiting_since.map_or(false, |t| t.elapsed().as_secs() >= 5) {
+                // Timeout: clock may not be delivering read_pos updates.
+                // Fall back to prebuffering from current write_pos.
+                info!("subscriber wait timed out (5s), entering prebuffering (clock may still be warming up)");
+                self.waiting_since = None;
+                self.prebuffer_written = 0;
+                self.state = BridgeState::Prebuffering;
+                self.metrics.reset();
             }
             self.last_read_pos = read_pos;
-            // Still no subscriber — audio written to ring as scratch, keep going
             return;
         }
 
@@ -471,7 +489,7 @@ impl SendspinBridge {
                     let read = rb.read_pos();
                     let fill = rb.write_pos.wrapping_sub(read) as isize;
                     info!(
-                        "prebuffer complete ({} samples written), fill={}, now transmitting",
+                        "prebuffer complete ({} samples), fill={}, now transmitting",
                         self.prebuffer_written, fill
                     );
                 }
@@ -486,6 +504,7 @@ impl SendspinBridge {
 
     fn log_metrics(&mut self) {
         match self.state {
+            BridgeState::Idle => {}
             BridgeState::WaitingForSubscriber => {
                 info!("[buffer] waiting for DANTE subscriber");
             }
@@ -498,22 +517,18 @@ impl SendspinBridge {
         }
     }
 
-    async fn stop_transmitter(&mut self) {
+    /// Full shutdown — only on process exit.
+    async fn shutdown(&mut self) {
         if let Some(rb) = &self.ring_buffer {
             rb.invalidate();
         }
         if let Some(mut server) = self.device_server.take() {
-            info!("stopping DANTE transmitter");
+            info!("stopping DANTE device");
             server.stop_transmitter().await;
             server.shutdown().await;
         }
         self.ring_buffer = None;
-        self.stream_format = None;
         self.state = BridgeState::Idle;
-    }
-
-    async fn shutdown(&mut self) {
-        self.stop_transmitter().await;
         info!("bridge shutdown complete");
     }
 }

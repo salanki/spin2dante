@@ -39,12 +39,12 @@ echo "=== Creating audio subscriptions (${STREAM_COUNT} pairs) ==="
 
 for i in $(seq -w 1 $STREAM_COUNT); do
     # Find the bridge device's full name (includes MAC suffix)
-    bridge_name=$(echo "$devices" | grep "SS${i} " | awk '{print $1, $2}' | head -1)
+    bridge_name=$(echo "$devices" | grep "SS${i} " | awk '{print $1}' | head -1)
     rx_name="rx${i}"
 
     if [ -z "$bridge_name" ]; then
         # Try without leading zero
-        bridge_name=$(echo "$devices" | grep "SS$((10#$i)) " | awk '{print $1, $2}' | head -1)
+        bridge_name=$(echo "$devices" | grep "SS$((10#$i)) " | awk '{print $1}' | head -1)
     fi
 
     if [ -n "$bridge_name" ]; then
