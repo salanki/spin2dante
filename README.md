@@ -129,7 +129,42 @@ netaudio device list
 # Should show your bridge names (Kitchen, Bedroom, etc.) with TX channels
 ```
 
-**Check audio is flowing** (after subscribing receivers in Dante Controller):
+### Routing Audio to DANTE Receivers
+
+Once bridges are running and visible, you need to subscribe your DANTE receivers to the bridge's output channels. You can use [Dante Controller](https://www.getdante.com/products/dante-controller/) (GUI) or [netaudio](https://pypi.org/project/netaudio/) (CLI).
+
+**Install netaudio:**
+```sh
+pip install netaudio
+```
+
+**List all devices on the network:**
+```sh
+netaudio device list
+```
+
+**Subscribe a receiver to a bridge (stereo):**
+```sh
+# Route Kitchen bridge channel 01 → amplifier channel 01
+netaudio subscription add --tx "01@Kitchen" --rx "01@MyAmplifier"
+netaudio subscription add --tx "02@Kitchen" --rx "02@MyAmplifier"
+```
+
+The `--tx` argument is `channel@device` for the transmitter (your bridge), and `--rx` is `channel@device` for the receiver (your DANTE amp/speaker). Channel names are typically `01`, `02` (factory names from inferno).
+
+**List active subscriptions:**
+```sh
+netaudio subscription list
+```
+
+**Remove a subscription:**
+```sh
+netaudio subscription remove --tx "01@Kitchen" --rx "01@MyAmplifier"
+```
+
+Subscriptions persist on the DANTE devices — they survive bridge restarts.
+
+**Check audio is flowing** (after subscribing receivers):
 ```sh
 docker compose logs bridge-kitchen | grep "\[buffer\]"
 # Healthy: [buffer] fill=2412 target=2400 drift=+1.2ppm ...
