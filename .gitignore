@@ -1,5 +1,6 @@
 /target
 Cargo.lock
+inferno-fork
 test/music_assistant/data/
 test/music_assistant/media/
 output/

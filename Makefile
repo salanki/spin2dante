@@ -5,7 +5,9 @@ MUSIC_ASSISTANT_DOCKER_CONFIG ?= /tmp/music-assistant-docker-config
 .PHONY: build test test-multi test-resilience test-ptp test-ptpv2 test-ma-interactive ma-up ma-down ma-logs clean
 
 ## Build the bridge Docker image
+## Requires inferno-fork symlink: ln -sf ../inferno-fork inferno-fork
 build:
+	@test -d inferno-fork/inferno_aoip || (echo "Error: inferno-fork not found. Run: ln -sf ../inferno-fork inferno-fork" && exit 1)
 	docker build -t spin2dante .
 
 ## Build the inferno2pipe image (required once before tests)
