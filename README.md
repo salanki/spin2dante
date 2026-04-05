@@ -14,19 +14,26 @@ Music Assistant
 │spin2dante│ ← one instance per zone
 │  bridge  │
 └────┬─────┘
-     │ DANTE (multicast UDP)
+     │ DANTE (unicast/multicast UDP)
      ▼
 DANTE Receivers (amplifiers, receivers, etc.)
 ```
 
-## Requirements
+## Deployment Options
 
-- **DANTE audio devices** on the network (these act as PTP clock master)
-- **Linux host** with a network interface on the same LAN as the DANTE devices
-- **Docker** with Docker Compose
+spin2dante supports two deployment models:
+
+1. **Docker Compose on Linux** — run `statime` and one or more `spin2dante`
+   containers on any Linux host that can run Docker.
+2. **Home Assistant add-on** — install the companion `statime` and
+   `spin2dante` add-ons from this repository.
+
+Both options require:
+
+- **DANTE audio devices** on the network (see [clock master](#clock-master-ptp) below)
 - **A Sendspin source** — typically [Music Assistant](https://www.music-assistant.io/) with the Sendspin provider enabled
 
-## Install in Home Assistant
+### Option 1: Install in Home Assistant
 
 This repository includes Home Assistant add-ons for both `statime` and
 `spin2dante`.
@@ -60,6 +67,23 @@ If the button does not work, add the repository manually:
 - Start `statime` first.
 - Start `spin2dante` after the clock is available.
 - Then subscribe your DANTE receivers to the `spin2dante` transmitters using Dante Controller or `netaudio`.
+
+### Clock Master (PTP)
+
+DANTE uses PTP (Precision Time Protocol) to synchronize audio clocks across all devices on the network. One device must act as the **PTP clock master** (leader).
+
+**PTPv1 (default — standard DANTE):** Statime runs as a PTPv1 **follower only**. An existing DANTE device on the network must be the clock master. This is the typical setup when you have DANTE amplifiers, receivers, or other hardware on the LAN — they provide the master clock.
+
+**PTPv2 (AES67 networks):** If you have no standard DANTE hardware but do have AES67-capable devices, you can switch Statime to PTPv2 mode. PTPv2 supports **master operation**, meaning Statime can act as the clock leader itself — no external PTP master needed. To enable this, change `protocol-version = "PTPv2"` in `statime/statime-docker.toml`. Note that PTPv2 interoperability with DANTE devices requires those devices to have AES67 enabled.
+
+See the [Inferno clocking documentation](https://gitlab.com/lumifaza/inferno#clocking-options) for details.
+
+### Option 2: Run with Docker Compose
+
+For Docker Compose deployment you need:
+
+- **Linux host** with a network interface on the same LAN as the DANTE devices
+- **Docker** with Docker Compose
 
 ## Quick Start
 
