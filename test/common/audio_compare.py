@@ -6,16 +6,42 @@ import sys
 
 def find_alignment(reference: bytes, capture: bytes, frame_bytes: int, window_frames: int, probe_frames: int):
     capture_frames = len(capture) // frame_bytes
-    reference_frames = len(reference) // frame_bytes
     max_start = min(max(capture_frames - window_frames, 0), probe_frames)
-    zero_window = b"\x00" * (window_frames * frame_bytes)
 
+    first_nonzero = None
     for capture_start in range(max_start + 1):
+        start_byte = capture_start * frame_bytes
+        frame = capture[start_byte:start_byte + frame_bytes]
+        if len(frame) < frame_bytes or not any(frame):
+            continue
+        first_nonzero = capture_start
+        break
+
+    if first_nonzero is None:
+        return None, None
+
+    search_end = min(max_start, first_nonzero + 4096)
+    for capture_start in range(first_nonzero, search_end + 1, 16):
         start_byte = capture_start * frame_bytes
         end_byte = start_byte + window_frames * frame_bytes
         window = capture[start_byte:end_byte]
-        if len(window) < window_frames * frame_bytes or window == zero_window or not any(window):
+        if len(window) < window_frames * frame_bytes:
+            break
+
+        ref_byte = reference.find(window)
+        while ref_byte != -1 and (ref_byte % frame_bytes) != 0:
+            ref_byte = reference.find(window, ref_byte + 1)
+        if ref_byte != -1:
+            return capture_start, ref_byte // frame_bytes
+
+    for capture_start in range(first_nonzero, search_end + 1):
+        if (capture_start - first_nonzero) % 16 == 0:
             continue
+        start_byte = capture_start * frame_bytes
+        end_byte = start_byte + window_frames * frame_bytes
+        window = capture[start_byte:end_byte]
+        if len(window) < window_frames * frame_bytes:
+            break
 
         ref_byte = reference.find(window)
         while ref_byte != -1 and (ref_byte % frame_bytes) != 0:
@@ -49,42 +75,26 @@ def analyze(reference: bytes, capture: bytes, sample_rate: int, channels: int, m
             "reason": "no exact alignment window found",
         }
 
-    offset_frames = reference_start - capture_start
-    capture_first = max(0, -offset_frames)
-    reference_first = max(0, offset_frames)
     capture_frames = len(capture) // frame_bytes
     reference_frames = len(reference) // frame_bytes
+    offset_frames = reference_start - capture_start
+    capture_first = capture_start
+    reference_first = reference_start
     overlap_frames = min(capture_frames - capture_first, reference_frames - reference_first)
-
-    longest_start = None
-    longest_len = 0
-    run_start = None
-    run_len = 0
-    matched_frames = 0
-    run_count = 0
-
-    for i in range(overlap_frames):
-        c0 = (capture_first + i) * frame_bytes
-        r0 = (reference_first + i) * frame_bytes
-        exact = capture[c0:c0 + frame_bytes] == reference[r0:r0 + frame_bytes]
-        if exact:
-            matched_frames += 1
-            if run_start is None:
-                run_start = i
-                run_len = 1
-                run_count += 1
-            else:
-                run_len += 1
-            if run_len > longest_len:
-                longest_len = run_len
-                longest_start = run_start
-        else:
-            run_start = None
-            run_len = 0
+    if overlap_frames <= 0:
+        return {
+            "alignment_found": False,
+            "pass": False,
+            "reason": "no overlapping frames after alignment",
+        }
 
     min_run_frames = int(min_run_seconds * sample_rate)
-    longest_end = None if longest_start is None else longest_start + longest_len
-    single_contiguous_match = matched_frames == longest_len
+    overlap_bytes = overlap_frames * frame_bytes
+    ref_overlap = reference[reference_first * frame_bytes:(reference_first * frame_bytes) + overlap_bytes]
+    cap_overlap = capture[capture_first * frame_bytes:(capture_first * frame_bytes) + overlap_bytes]
+    exact_overlap = ref_overlap == cap_overlap
+
+    matched_frames = overlap_frames if exact_overlap else 0
 
     result = {
         "alignment_found": True,
@@ -97,20 +107,20 @@ def analyze(reference: bytes, capture: bytes, sample_rate: int, channels: int, m
         "overlap_frames": overlap_frames,
         "matched_frames": matched_frames,
         "match_ratio": (matched_frames / overlap_frames) if overlap_frames else 0.0,
-        "run_count": run_count,
-        "longest_run_frames": longest_len,
-        "longest_run_seconds": longest_len / sample_rate,
-        "longest_run_start_frame": longest_start,
-        "longest_run_end_frame": longest_end,
-        "single_contiguous_match": single_contiguous_match,
+        "run_count": 1 if exact_overlap else 0,
+        "longest_run_frames": overlap_frames if exact_overlap else 0,
+        "longest_run_seconds": overlap_frames / sample_rate if exact_overlap else 0.0,
+        "longest_run_start_frame": 0 if exact_overlap else None,
+        "longest_run_end_frame": overlap_frames if exact_overlap else None,
+        "single_contiguous_match": exact_overlap,
     }
 
-    if longest_len < min_run_frames:
+    if overlap_frames < min_run_frames:
         result["pass"] = False
-        result["reason"] = f"longest exact run too short ({longest_len} frames)"
-    elif not single_contiguous_match:
+        result["reason"] = f"overlap too short ({overlap_frames} frames)"
+    elif not exact_overlap:
         result["pass"] = False
-        result["reason"] = "exact matches split into multiple runs"
+        result["reason"] = "overlap differs from reference"
     else:
         result["pass"] = True
         result["reason"] = "bit-perfect overlap found"
