@@ -210,6 +210,7 @@ The owned buffer path provides:
 - `readable_pos` tracking on the write side (inferno only reads validated data)
 - `unconditional_read() == false` (reads check readable_pos)
 - Hole detection and fill via `hole_fix_wait`
+- TX packetization with dithering disabled, so 24-bit PCM can be validated bit-for-bit over the received overlap
 
 The fork does NOT yet expose the consumer-side read position. The bridge uses `current_timestamp` as an approximation.
 

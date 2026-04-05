@@ -61,6 +61,9 @@ pub struct SendspinBridge {
     rb_inputs: Option<Vec<RBInput<Sample, OwnedBuffer<Atomic<Sample>>>>>,
     device_server: Option<DeviceServer>,
     current_timestamp: Arc<AtomicUsize>,
+    /// The actual ring buffer position the FlowsTransmitter reads from.
+    /// This is `start_ts = next_ts + timestamp_shift` — the true consumer cursor.
+    read_position: Arc<AtomicUsize>,
     // Stream state (reset per stream)
     write_pos: usize,
     prebuffer_target: usize,
@@ -83,6 +86,7 @@ impl SendspinBridge {
             rb_inputs: None,
             device_server: None,
             current_timestamp: Arc::new(AtomicUsize::new(usize::MAX)),
+            read_position: Arc::new(AtomicUsize::new(usize::MAX)),
             write_pos: 0,
             prebuffer_target,
             prebuffer_written: 0,
@@ -126,6 +130,8 @@ impl SendspinBridge {
         let (start_tx, start_rx) = oneshot::channel();
         self.current_timestamp
             .store(usize::MAX, std::sync::atomic::Ordering::SeqCst);
+        self.read_position
+            .store(usize::MAX, std::sync::atomic::Ordering::SeqCst);
 
         let rb_inputs = server
             .transmit_from_owned_buffer(
@@ -134,6 +140,7 @@ impl SendspinBridge {
                 HOLE_FIX_WAIT,
                 start_rx,
                 self.current_timestamp.clone(),
+                self.read_position.clone(),
                 None,
             )
             .await;
@@ -273,12 +280,12 @@ impl SendspinBridge {
         }
     }
 
-    /// Get an approximation of the FlowsTransmitter's read position.
-    /// Uses current_timestamp which is the PTP-domain sample time of the
-    /// last transmitted packet. Returns 0 if the transmitter hasn't started.
+    /// Get the actual ring buffer read position from the FlowsTransmitter.
+    /// This is `start_ts = next_ts + timestamp_shift` — the true consumer cursor.
+    /// Returns 0 if the transmitter hasn't started reading yet.
     fn get_read_pos(&self) -> usize {
-        let ts = self.current_timestamp.load(std::sync::atomic::Ordering::Relaxed);
-        if ts == usize::MAX { 0 } else { ts }
+        let pos = self.read_position.load(std::sync::atomic::Ordering::Relaxed);
+        if pos == usize::MAX { 0 } else { pos }
     }
 
     fn enter_idle(&mut self) {
