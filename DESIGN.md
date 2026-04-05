@@ -161,7 +161,7 @@ The bridge has an outer reconnect loop. If the WebSocket drops (server restart, 
 
 ## Multi-Stream Deployment
 
-One bridge process per Sendspin stream. For 32 streams: 32 containers, each with unique `--name` and `INFERNO_DEVICE_ID`.
+One bridge process per Sendspin stream. For 32 streams: 32 containers, each with unique `--name`, `INFERNO_PROCESS_ID`, and `INFERNO_ALT_PORT`. Device ID is auto-derived from host IP + process ID.
 
 ## Configuration
 
@@ -171,8 +171,9 @@ One bridge process per Sendspin stream. For 32 streams: 32 containers, each with
 - `--buffer-ms`: Jitter buffer size in ms (default: 50)
 
 ### Environment Variables (passed through to inferno_aoip)
-- `INFERNO_BIND_IP`, `INFERNO_DEVICE_ID`, `INFERNO_SAMPLE_RATE`
-- `INFERNO_CLOCK_PATH`, `INFERNO_TX_LATENCY_NS`
+- `INFERNO_CLOCK_PATH`, `INFERNO_SAMPLE_RATE`, `INFERNO_BIND_IP`
+- `INFERNO_PROCESS_ID`, `INFERNO_ALT_PORT` (required for multiple bridges on same host)
+- `INFERNO_TX_LATENCY_NS`
 
 ## Lessons Learned
 

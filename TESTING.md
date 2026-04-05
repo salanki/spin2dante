@@ -148,7 +148,7 @@ failed to read `/build/searchfire/Cargo.toml`: No such file or directory
 
 The containers start in dependency order, but some take time to initialize:
 
-1. **sendspin_source** (~15-20s): pip installs sendspin, generates WAV, starts server
+1. **sendspin_source** (~5-10s): generates 30s WAV test tone, starts sendspin server (pip install happens at image build time)
 2. **bridge** retries connection every 2s until sendspin_source is ready
 3. **i2pipe** sleeps 5s before starting (gives bridge time to register as DANTE device)
 4. **FlowsTransmitter** may log "clock unavailable" for ~10-20s until it receives its first PTP overlay
@@ -313,48 +313,15 @@ Each bridge/receiver needs a unique `INFERNO_DEVICE_ID` to avoid mDNS conflicts.
 
 ## Real PTP Test (`make test-ptp`)
 
-Uses [Statime](https://github.com/teodly/statime/tree/inferno-dev) (a real PTP daemon) instead of the `fake_usrvclock_server`. This validates the bridge works correctly with proper PTP clock synchronization — the same setup required for production deployment.
+**Status: not functional in pure Docker.** This test infrastructure exists but requires real DANTE hardware on the LAN. For CI/Docker-only testing, use `make test` instead.
 
-### What's different from `make test`
-
-| | `make test` (dev) | `make test-ptp` (real PTP) |
-|---|---|---|
-| Clock source | `fake_usrvclock_server` (CLOCK_MONOTONIC_RAW, no sync) | Statime PTPv2 (real PTP, software timestamps) |
-| Clock accuracy | Each container has independent monotonic time | All containers share PTP-synchronized time |
-| Production-like | No | Yes |
-| Build time | Fast (small C program) | Slow (full Rust Statime build, first run ~3-5 min) |
-
-### How it works
-
-- Statime runs as PTPv2 follower with `virtual-system-clock-base = "monotonic_raw"`
-- It syncs against a PTP master (typically a DANTE device on the network)
-- It creates the usrvclock socket at `/shared/usrvclock` via `usrvclock-export = true`
-- All inferno containers read from this socket — same interface as the fake server
-- Statime needs `CAP_SYS_TIME` capability (granted via `cap_add` in compose)
-
-### Requirements
-
-- **Real DANTE hardware** on the network acting as PTP master
-- **Host with a globally-administered MAC address** (bare metal, not VM/Docker)
-- The Statime Docker image builds from source (~3-5 min on first run)
-
-```sh
-make test-ptp
-```
-
-### Config file
-
-The Statime config is at `test/statime/statime-docker.toml`. Key settings:
-- `protocol-version = "PTPv2"` — PTPv2 protocol
-- `priority1 = 251` — high value = prefer to be PTP follower
-- `usrvclock-export = true` — export clock via usrvclock protocol
-- `usrvclock-path = "/shared/usrvclock"` — socket on shared volume
-- `hardware-clock = "auto"` — auto-detect hardware timestamping
-- `interface = "eth0"` — auto-detected by entrypoint script
+Uses [Statime](https://github.com/teodly/statime/tree/inferno-dev) (PTP daemon) instead of `fake_usrvclock_server`. The test compose (`test/docker-compose.ptp.yml`) runs Statime on a Docker bridge network with PTPv1, software timestamps (`hardware-clock = "none"`). It shares the production Statime config from `statime/statime-docker.toml`.
 
 ### Why this doesn't work in pure Docker
 
-A standalone PTP master with no followers never exports clock overlays via usrvclock — it has nothing to synchronize against. The fake_usrvclock_server used by `make test` avoids this by sending unconditional periodic updates. For CI/Docker-only testing, `make test` is the correct path.
+Statime as a PTPv1 follower with no PTP master on the network never receives sync messages, so it never exports clock overlays via usrvclock. Inferno's FlowsTransmitter permanently reports "clock unavailable." The `fake_usrvclock_server` avoids this by sending unconditional periodic updates regardless of PTP state.
+
+To actually use this test, you need DANTE hardware on the network as PTP master, and Statime must be able to reach it (may require `network_mode: host` on the Statime container in the test compose).
 
 ## Edge Case Behavior
 
