@@ -300,16 +300,16 @@ Sync quality thresholds:
 
 ### Resource requirements
 
-11 containers total (4 bridges + 4 receivers + clock + source + control). Each inferno DeviceServer uses a real-time thread. Expect:
+35 containers total (16 bridges + 16 receivers + clock + source + control). Each inferno DeviceServer uses a real-time thread. Expect:
 - ~2-3GB RAM
 - Significant CPU during startup (all containers building/initializing in parallel)
 - ~3-4 minutes total runtime (builds + discovery timeout + 20s recording)
 
 ### Container naming
 
-Each bridge/receiver needs a unique `INFERNO_DEVICE_ID` to avoid mDNS conflicts. The compose file assigns sequential IDs:
-- Bridges: `0000000000000101` through `0000000000000104`
-- Receivers: `0000000000000201` through `0000000000000204`
+The test harness uses explicit `INFERNO_DEVICE_ID` values (not `PROCESS_ID`/`ALT_PORT`) because all containers are on a Docker bridge network with unique IPs, unlike production where all bridges share the host IP. This is a harness-specific shortcut.
+- Bridge IDs: `0000000000000101` through `0000000000000110`
+- Receiver IDs: `0000000000000201` through `0000000000000210`
 
 ## PTPv2 Test (`make test-ptpv2`)
 
