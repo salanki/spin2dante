@@ -15,11 +15,27 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
+  STATIME_REPOSITORY: https://github.com/teodly/statime.git
+  STATIME_REF: inferno-dev
 
 jobs:
   docker:
-    name: Build container image
+    name: Build ${{ matrix.image_name }} image
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image_name: spin2dante
+            context: .
+            dockerfile: ./Dockerfile
+            build_args: ""
+          - image_name: spin2dante-statime
+            context: ./statime
+            dockerfile: ./statime/Dockerfile
+            build_args: |
+              STATIME_REPOSITORY=${{ env.STATIME_REPOSITORY }}
+              STATIME_REF=${{ env.STATIME_REF }}
 
     steps:
       - name: Check out repository
@@ -43,7 +59,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ github.repository }}
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image_name }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=branch
@@ -53,11 +69,12 @@ jobs:
       - name: Build and publish container image
         uses: docker/build-push-action@v6
         with:
-          context: .
-          file: ./Dockerfile
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
+          build-args: ${{ matrix.build_args }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.image_name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image_name }}

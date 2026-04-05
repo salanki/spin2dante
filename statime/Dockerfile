@@ -1,7 +1,9 @@
 FROM rust:1-alpine AS builder
+ARG STATIME_REPOSITORY=https://github.com/teodly/statime.git
+ARG STATIME_REF=inferno-dev
 RUN apk add --no-cache musl-dev git
 WORKDIR /build
-RUN git clone --recurse-submodules -b inferno-dev https://github.com/teodly/statime.git .
+RUN git clone --recurse-submodules -b "$STATIME_REF" "$STATIME_REPOSITORY" .
 ENV RUSTFLAGS="-C target-feature=-crt-static"
 RUN cargo build --release -p statime-linux 2>&1
 
