@@ -2,3 +2,4 @@
 Cargo.lock
 test/music_assistant/data/
 test/music_assistant/media/
+output/
