@@ -117,10 +117,10 @@ Since Docker containers have isolated filesystems (even with host networking), t
 
 ### Verifying the Deployment
 
-**Check Statime is synced** (look for "Master" state):
+**Check Statime is synced** (look for "Slave" state — means it found the DANTE PTP master):
 ```sh
 docker compose logs statime | grep "new state"
-# Expected: "new state for port 1: Listening -> Master" or "-> Slave"
+# Expected: "new state for port 1: Listening -> Slave"
 ```
 
 **Check DANTE devices are visible:**

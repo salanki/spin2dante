@@ -11,7 +11,7 @@ Sendspin Server (Music Assistant)
         │ WebSocket (PCM audio chunks)
         ▼
 ┌─────────────────────┐
-│   sendspin_bridge    │  ← this crate (separate repo)
+│    spin2dante        │  ← this crate
 │                      │
 │  1. Connect as player│
 │  2. Receive audio    │
