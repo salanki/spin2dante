@@ -56,17 +56,15 @@ The bridge writes at positions in its own domain (0, 1, 2, ...) while the FlowsT
 - Our `write_pos` starts at 0 and increments monotonically
 - Inferno's `start_ts` (read position) is `next_ts + timestamp_shift`, where `next_ts` is a PTP timestamp
 
-With owned buffers (`unconditional_read = false`), inferno checks `readable_pos` before reading. If the transmitter's `start_ts` is outside the range we've written, it reads zeros. This is why the current implementation produces very quiet audio — mostly zeros with occasional valid samples where positions happen to overlap modulo ring buffer size.
+With owned buffers (`unconditional_read = false`), inferno checks `readable_pos` before reading. If the transmitter's `start_ts` is outside the range we've written, it reads zeros. The inferno fork now exposes that true consumer read position so the bridge can align writes to the actual PTP-domain read cursor instead of guessing from an approximation.
 
-**Status: WIP.** The fix requires exposing the actual consumer read position (or `timestamp_shift`) from the FlowsTransmitter, so the bridge can write at the correct PTP-domain positions. This is a planned addition to the inferno fork.
+### Read position tracking
 
-### Read position approximation
+The inferno fork exposes the actual TX-side consumer cursor by publishing `start_ts` from the FlowsTransmitter. The bridge uses that true read position for:
 
-Until the true consumer position is exposed, the bridge uses `current_timestamp` (an atomic updated by the FlowsTransmitter) as an approximation. This value is `min_next_ts` — the earliest pending TX timestamp — not the actual `start_ts` used for ring reads. The approximation is biased by TX latency but provides directionally correct information for:
-
-- `snap_to_live()`: aligning write_pos to approximately where inferno reads
-- `WaitingForSubscriber`: detecting when the FlowsTransmitter starts operating
-- Buffer fill estimation (approximate, not exact)
+- `snap_to_live()`: aligning `write_pos` to where inferno will actually read next
+- `WaitingForSubscriber`: detecting when the FlowsTransmitter has started consuming
+- Buffer fill estimation against the real consumer cursor
 
 ## Device Lifetime
 
@@ -210,9 +208,9 @@ The owned buffer path provides:
 - `readable_pos` tracking on the write side (inferno only reads validated data)
 - `unconditional_read() == false` (reads check readable_pos)
 - Hole detection and fill via `hole_fix_wait`
-- TX packetization with dithering disabled, so 24-bit PCM can be validated bit-for-bit over the received overlap
+- Configurable TX dithering, with spin2dante explicitly disabling the 24-bit path so PCM payloads can be validated bit-for-bit over the received overlap
 
-The fork does NOT yet expose the consumer-side read position. The bridge uses `current_timestamp` as an approximation.
+The fork exposes the consumer-side read position, and the bridge uses that real cursor instead of approximating from `current_timestamp`.
 
 ## Lessons Learned
 
