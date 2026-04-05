@@ -34,8 +34,8 @@ jobs:
             context: ./statime
             dockerfile: ./statime/Dockerfile
             build_args: |
-              STATIME_REPOSITORY=${{ env.STATIME_REPOSITORY }}
-              STATIME_REF=${{ env.STATIME_REF }}
+              STATIME_REPOSITORY=https://github.com/teodly/statime.git
+              STATIME_REF=inferno-dev
 
     steps:
       - name: Check out repository
