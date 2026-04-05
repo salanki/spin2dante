@@ -2,7 +2,7 @@ name: "spin2dante"
 version: "edge"
 slug: spin2dante
 description: >-
-  Bridge Sendspin audio streams, such as Music Assistant playback, to DANTE.
+  Bit-perfect bridge of one or more Sendspin audio streams to Audinate DANTE channels.
 url: "https://github.com/salanki/spin2dante"
 stage: experimental
 startup: application
@@ -10,6 +10,7 @@ boot: auto
 init: false
 host_network: true
 legacy: true
+realtime: true
 arch:
   - aarch64
   - amd64
@@ -24,15 +25,34 @@ ulimits:
   memlock:
     soft: 200000000
     hard: 200000000
+  rtprio:
+    soft: 99
+    hard: 99
 options:
-  url: "ws://music-assistant.local:8927/sendspin"
-  name: "Sendspin Bridge"
-  buffer_ms: 50
   clock_path: "/share/usrvclock"
+  wait_for_clock_seconds: 30
   log_level: "info"
+  bridges:
+    - id: kitchen
+      name: Kitchen
+      url: "ws://music-assistant.local:8927/sendspin"
+      buffer_ms: 50
+      process_id: 1
+      alt_port: 14000
+    - id: livingroom
+      name: "Living Room"
+      url: "ws://music-assistant.local:8927/sendspin"
+      buffer_ms: 50
+      process_id: 2
+      alt_port: 14010
 schema:
-  url: str
-  name: str
-  buffer_ms: int(10,5000)
   clock_path: str
+  wait_for_clock_seconds: int(0,300)
   log_level: list(trace|debug|info|warn|error)
+  bridges:
+    - id: match(^[a-z0-9][a-z0-9_-]*$)
+      name: str
+      url: str
+      buffer_ms: int(10,5000)
+      process_id: int(1,65535)
+      alt_port: int(1024,65532)
