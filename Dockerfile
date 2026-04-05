@@ -9,4 +9,5 @@ RUN cargo build --release 2>&1
 FROM alpine:3
 RUN apk add --no-cache alsa-lib libgcc
 COPY --from=builder /build/target/release/spin2dante /usr/local/bin/
-ENTRYPOINT ["spin2dante"]
+# Ensure TMPDIR exists (needed for usrvclock client sockets on shared volume)
+ENTRYPOINT ["/bin/sh", "-c", "mkdir -p ${TMPDIR:-/tmp} && exec spin2dante \"$@\"", "--"]
