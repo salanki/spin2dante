@@ -1,4 +1,4 @@
-use log::{info, warn};
+use log::{debug, info};
 use std::time::Instant;
 
 /// Tracks jitter buffer health metrics for console logging.
@@ -81,10 +81,10 @@ impl BufferMetrics {
             self.stalled_intervals += 1;
             if self.stalled_intervals >= 2 {
                 self.was_stalled = true;
-                warn!(
-                    "[buffer] no active DANTE subscriber; audio buffered but not being consumed \
-                     (fill={}, write_pos={})",
-                    fill, write_pos
+                debug!(
+                    "[buffer] read_pos not advancing (stalled for {} intervals, \
+                     fill={}, write_pos={}, read_pos={})",
+                    self.stalled_intervals, fill, write_pos, read_pos
                 );
                 return;
             }

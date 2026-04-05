@@ -127,6 +127,21 @@ On stream/clear, the bridge must discard stale audio that inferno is about to re
 
 This ensures inferno reads silence immediately (not stale pre-seek audio), then the bridge refills the jitter buffer with fresh data.
 
+### Subscriber reconnect alignment
+
+If a DANTE subscriber disconnects and reconnects (or a new subscriber joins while a stream is active), the bridge must ensure the subscriber hears current audio, not stale data left in the ring buffer from an earlier write position.
+
+The mechanism: when `read_pos` starts advancing at a new position (detected in WaitingForSubscriber or during Running state monitoring), `snap_to_live()` fires:
+
+1. Read the subscriber's current `read_pos`
+2. Zero-fill `[read_pos, read_pos + prebuffer_target)` — brief silence
+3. Set `write_pos = read_pos + prebuffer_target`
+4. Enter Prebuffering with fresh audio
+
+This anchors the bridge's write position to wherever the subscriber is reading NOW. The subscriber gets current audio with only a prebuffer-sized gap of silence (~50ms), regardless of how long the bridge was writing to the ring before the subscriber appeared.
+
+**Note:** This mechanism requires `read_pos` from `PositionReportDestination` to advance, which only happens when inferno's FlowsTransmitter has a valid PTP clock and is actively reading. In Docker test environments with the fake clock, the clock overlay may not propagate reliably to the FlowsTransmitter, so a 5-second timeout fallback enters Prebuffering without snap-to-live alignment. In production with a real PTP clock (Statime synced to DANTE hardware), snap_to_live works correctly.
+
 ## Data Path
 
 1. Sendspin delivers `AudioChunk { data: Arc<[u8]> }` — raw PCM bytes over WebSocket
