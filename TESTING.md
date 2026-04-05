@@ -349,24 +349,15 @@ The Statime config is at `test/statime/statime-docker.toml`. Key settings:
 - `hardware-clock = "none"` — software timestamps (no real PTP hardware in Docker)
 - `interface = "eth0"` — Docker's default interface
 
-### Known issue: Statime panics on Docker virtual NICs
+### Current status: requires real DANTE hardware
 
-Statime's `main.rs` has a bug where `get_clock_id()` is evaluated eagerly via `unwrap_or` even when `config.identity` is set:
+The `make test-ptp` infrastructure is complete but **does not yet pass in a pure Docker environment**. Two issues:
 
-```rust
-// This evaluates get_clock_id() even when identity is Some(...)
-let clock_identity = config.identity.unwrap_or(
-    ClockIdentity(get_clock_id(&allowed_interfaces).expect("could not get clock identity"))
-);
-// Should be unwrap_or_else(|| ...) for lazy evaluation
-```
+1. **Statime identity bug** (fixed in our Dockerfile via `sed`): `unwrap_or` evaluates `get_clock_id()` eagerly even when `identity` is configured, panicking on Docker/VM locally-administered MACs. Our Dockerfile patches this to `unwrap_or_else`.
 
-Docker's virtual NICs have locally-administered MACs (`02:xx:xx`) which `get_clock_id` rejects, causing a panic. Workarounds:
-- Run Statime with `network_mode: host` on a machine with a physical NIC
-- Patch Statime to use `unwrap_or_else` (upstream fix needed)
-- Use the `fake_usrvclock_server` for CI (the `make test` path)
+2. **Standalone master doesn't export overlays**: Statime as a PTP master with no followers has nothing to synchronize against, so it never calls the usrvclock overlay export callback after the initial clock step. This means inferno's FlowsTransmitter never receives a valid clock overlay. The fake_usrvclock_server avoids this by sending periodic overlays unconditionally (every 1 second via `select` timeout).
 
-The PTP test (`make test-ptp`) requires a host environment where Statime can detect a valid NIC MAC address.
+**Bottom line**: Real PTP testing requires actual DANTE devices on the network for Statime to sync against. For CI/Docker-only testing, `make test` (with fake clock) is the correct path — it validates the bridge logic without requiring real PTP synchronization.
 
 ## Known Limitations
 

@@ -15,7 +15,11 @@ priority1 = 128
 priority2 = 128
 
 virtual-system-clock = true
-virtual-system-clock-base = "monotonic_raw"
+# Use TAI as base: disables the clock guard that blocks overlay export
+# during the initial clock step (which happens with monotonic_raw).
+# TAI works fine for Docker testing — the clock guard is only needed to
+# protect against NTP jumps on CLOCK_REALTIME.
+virtual-system-clock-base = "tai"
 
 # Manual clock identity — Docker virtual NICs don't have hardware MAC addresses
 # that Statime can derive an identity from, so we set one explicitly.

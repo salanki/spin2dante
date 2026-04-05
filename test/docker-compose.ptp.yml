@@ -56,7 +56,7 @@ services:
       INFERNO_RX_CHANNELS: "0"
       INFERNO_SAMPLE_RATE: "48000"
       TMPDIR: /shared/tmp_bridge
-      RUST_LOG: "info"
+      RUST_LOG: "info,usrvclock=debug"
     volumes:
       - shared:/shared
     networks:
