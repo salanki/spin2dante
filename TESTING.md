@@ -346,11 +346,13 @@ Uses real PTP clock synchronization via two Statime instances instead of the `fa
 
 Only PTP **followers** export usrvclock overlays. A master doesn't adjust its clock (it IS the reference), so the overlay export callback never fires. The follower syncs to the master and continuously adjusts its clock, triggering overlay exports that inferno reads.
 
-### Key discovery: PositionReportDestination doesn't work with ExternalBuffer
+### Current limitation: write/read domain alignment
 
-Inferno's `ExternalBuffer::unconditional_read()` returns `true`, which skips the `readable_pos` update in `read_at()`. This means `PositionReportDestination` is never updated, so our `read_pos`-based metrics always show 0. Audio flows correctly — the FlowsTransmitter reads and sends packets — but we can't observe the read position from the bridge code.
+The bridge uses owned buffers (`transmit_from_owned_buffer()`) which track `readable_pos` properly. However, the bridge writes at local-domain positions (0, 1, 2...) while the FlowsTransmitter reads at PTP-domain positions. With owned buffers and `unconditional_read() = false`, inferno only reads data marked as readable — positions that rarely overlap with the PTP read domain.
 
-This is why buffer metrics (fill, drift, overruns) are unreliable even with a real PTP clock.
+The bridge approximates the read position from `current_timestamp` (an atomic updated by the FlowsTransmitter). This is `min_next_ts`, not the actual `start_ts` used for ring reads, so alignment is approximate. True alignment requires exposing the consumer read position from the inferno fork (planned).
+
+Buffer metrics (fill, drift) are approximate for this reason.
 
 ### Running the test
 
@@ -384,7 +386,7 @@ Tested and validated via `make test-resilience`:
 | **Stream seek (StreamClear)** | Stale buffered audio is zeroed from current read position. Bridge enters rebuffer mode, refills jitter buffer with fresh data, then resumes. |
 | **Stream ends (StreamEnd)** | Ring zeroed, bridge enters Idle. DANTE device stays on network. |
 | **New stream with same format (StreamStart, already Running)** | Stale audio cleared, rebuffer mode, no device restart. |
-| **New stream with different format** | DANTE device fully restarted with new settings. |
+| **New stream with different format** | Format validated; if supported (PCM 16/24-bit), stream_format updated and enters WaitingForSubscriber. Unsupported formats rejected. Device is NOT restarted. |
 | **PTP master disappears** | Statime stops exporting clock overlays. FlowsTransmitter reports "clock unavailable" until PTP master returns. Audio stops but bridge stays alive. |
 | **Multiple StreamStart without StreamEnd** | If already Running with same format: clear + rebuffer. Otherwise: enter WaitingForSubscriber. |
 

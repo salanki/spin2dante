@@ -2,7 +2,7 @@
 
 ## Context
 
-This bridge streams audio from Sendspin sources (e.g., Music Assistant) to DANTE receivers without going through the ALSA subsystem. It's a direct protocol-to-protocol bridge: receive audio via Sendspin's WebSocket protocol, write it into inferno_aoip's transmit ring buffers, and let the DANTE TX engine send it on the network. The result is a completely userspace, bit-perfect (for PCM) audio bridge.
+This bridge streams audio from Sendspin sources (e.g., Music Assistant) to DANTE receivers without going through the host's audio subsystem. It's a direct protocol-to-protocol bridge: receive audio via Sendspin's WebSocket protocol, write it into inferno_aoip's transmit ring buffers, and let the DANTE TX engine send it on the network. The result is a completely userspace, bit-perfect (for PCM) audio bridge.
 
 ## Architecture
 
@@ -16,14 +16,12 @@ Sendspin Server (Music Assistant)
 │  1. Connect as player│
 │  2. Receive audio    │
 │  3. Deinterleave     │
-│  4. Atomic write to  │
-│     ring buffers     │
+│  4. Write via RBInput│
 └────────┬────────────┘
-         │ Vec<Atomic<i32>> (self-owned, per channel)
-         │ exposed via ExternalBufferParameters
+         │ Owned ring buffers (RBInput/RBOutput)
          ▼
 ┌─────────────────────┐
-│   inferno_aoip       │  ← UNMODIFIED upstream dependency
+│   inferno_aoip       │  ← fork with transmit_from_owned_buffer()
 │   DeviceServer       │
 │                      │
 │  FlowsTransmitter   │
@@ -36,52 +34,61 @@ Sendspin Server (Music Assistant)
    DANTE Receivers
 ```
 
-**Key design decision**: Zero changes to inferno_aoip. The bridge uses the existing public `ExternalBufferParameters` + `transmit_from_external_buffer` API.
+The bridge uses a fork of inferno_aoip that adds `transmit_from_owned_buffer()` — a method that creates owned ring buffers with proper `readable_pos` tracking and returns `RBInput` write handles to the caller.
 
 ## Clock Model
 
-### Model: "start at zero, infer running position"
+### Overview
 
 The bridge sends `start_time = 0` to inferno immediately. This means:
 
 ```
 timestamp_shift = -0 - latency = -latency
-read_pos = (ptp_now - latency) % RING_BUFFER_SIZE
+TX read position = next_ts + timestamp_shift = next_ts - latency
 ```
 
-Since `ExternalBuffer::unconditional_read()` returns true, inferno reads whatever is in the ring buffer at `read_pos` without checking write/readable positions. The bridge writes at monotonically increasing positions that wrap around the ring buffer naturally.
+The FlowsTransmitter reads from the ring buffer at PTP-domain positions. The bridge writes at monotonically increasing positions starting from 0. With owned buffers, inferno only reads data that has been marked as readable via `write_from_at()`.
 
-The bridge does NOT obtain a PTP clock directly. Instead, it uses the `PositionReportDestination` mechanism to observe where inferno is reading. The jitter buffer is maintained by keeping `write_pos` ahead of `read_pos`.
+### Current limitation: write/read domain alignment
 
-### Why not PTP-anchored start_time?
+The bridge writes at positions in its own domain (0, 1, 2, ...) while the FlowsTransmitter reads at PTP-domain positions (`next_ts - latency`). These domains don't align:
 
-The `get_realtime_clock_receiver()` API returns a `RealTimeBoxReceiver` designed for real-time threads. On a single-threaded tokio runtime, the background task that feeds it may not deliver overlays reliably to user code. The "start at zero" model avoids this issue entirely and still produces correct audio output.
+- Our `write_pos` starts at 0 and increments monotonically
+- Inferno's `start_ts` (read position) is `next_ts + timestamp_shift`, where `next_ts` is a PTP timestamp
 
-### Device Lifetime
+With owned buffers (`unconditional_read = false`), inferno checks `readable_pos` before reading. If the transmitter's `start_ts` is outside the range we've written, it reads zeros. This is why the current implementation produces very quiet audio — mostly zeros with occasional valid samples where positions happen to overlap modulo ring buffer size.
 
-The DANTE device (DeviceServer + TX) is started **once at process startup** and stays alive for the entire process lifetime. This matches standard DANTE behavior where devices are persistent network entities. Subscriptions configured in Dante Controller persist across playback sessions.
+**Status: WIP.** The fix requires exposing the actual consumer read position (or `timestamp_shift`) from the FlowsTransmitter, so the bridge can write at the correct PTP-domain positions. This is a planned addition to the inferno fork.
+
+### Read position approximation
+
+Until the true consumer position is exposed, the bridge uses `current_timestamp` (an atomic updated by the FlowsTransmitter) as an approximation. This value is `min_next_ts` — the earliest pending TX timestamp — not the actual `start_ts` used for ring reads. The approximation is biased by TX latency but provides directionally correct information for:
+
+- `snap_to_live()`: aligning write_pos to approximately where inferno reads
+- `WaitingForSubscriber`: detecting when the FlowsTransmitter starts operating
+- Buffer fill estimation (approximate, not exact)
+
+## Device Lifetime
+
+The DANTE device (DeviceServer + TX) is started **once at process startup** and stays alive for the entire process lifetime. This matches standard DANTE behavior where devices are persistent network entities.
 
 ### Startup sequence
 
 1. `DeviceServer::start()` — creates DANTE device, blocks until PTP clock available
-2. Ring buffer created and zeroed (silence)
-3. `transmit_from_external_buffer()` — registers ring buffers with inferno
-4. `start_tx.send(0)` — starts FlowsTransmitter (idle, transmitting silence)
-5. Bridge enters **Idle** state — device visible on network, ring silent
-6. Connect to Sendspin server (retry loop)
-7. On StreamStart → enter **WaitingForSubscriber**
+2. `transmit_from_owned_buffer()` — creates owned ring buffers, returns RBInput handles
+3. `start_tx.send(0)` — starts FlowsTransmitter (idle, transmitting silence/zeros)
+4. Bridge enters **Idle** state — device visible on network
+5. Connect to Sendspin server (retry loop)
+6. On StreamStart → enter **WaitingForSubscriber**
 
-The FlowsTransmitter may report "clock unavailable" until it receives its first PTP overlay. This is non-blocking — the device is still registered and visible on the network.
+### WaitingForSubscriber and timeout fallback
 
-### Why WaitingForSubscriber exists
+When a stream starts, the bridge writes audio via `RBInput::write_from_at()`. It monitors `current_timestamp` to detect when the FlowsTransmitter is operating:
 
-When a stream starts, the bridge writes audio to the ring buffer. But inferno reads at `(ptp_now - latency) % RING_BUFFER_SIZE` — a position determined by the PTP clock, not by our write position. If no subscriber has connected yet, or the PTP clock isn't available, the read and write positions are in different domains.
+- If `current_timestamp` changes from `usize::MAX` → snap_to_live()
+- If no change within 5 seconds → fall back to Prebuffering without alignment
 
-WaitingForSubscriber is designed to detect when a subscriber connects and the clock is working, then snap the write position to the read position. It monitors `read_pos` from `PositionReportDestination` and, when it advances, calls `snap_to_live()`.
-
-**In practice, snap_to_live never fires** because `ExternalBuffer::unconditional_read()` returns `true`, which causes inferno to skip `PositionReportDestination` updates (see [PositionReportDestination limitation](#positionreportdestination-limitation) below). The `read_pos` value is always 0.
-
-Instead, WaitingForSubscriber always hits its **5-second timeout** and falls back to Prebuffering without alignment. Audio still flows correctly — inferno reads from the ring at PTP-determined positions, and our continuous writes keep the ring populated. The alignment between write and read positions is not perfect but is sufficient for audio playback.
+The timeout fallback is pragmatic for environments where the PTP clock takes time to propagate to the FlowsTransmitter.
 
 ## State Machine
 
@@ -101,54 +108,26 @@ process start → Idle (device + TX alive, ring silent)
 
 All states have the DANTE device + TX alive. The difference is what audio is in the ring:
 
-- **Idle**: Ring is explicitly zeroed (silence). No stale audio can loop.
-- **WaitingForSubscriber**: Discardable scratch audio in ring, waiting for subscriber + clock.
+- **Idle**: Ring filled with silence. No stale audio can leak.
+- **WaitingForSubscriber**: Discardable scratch audio in ring, waiting for TX to start.
 - **Prebuffering**: Fresh audio accumulating after snap_to_live (or timeout fallback).
-- **Running**: Live audio with correct jitter buffer.
+- **Running**: Live audio being written and transmitted.
 - **Rebuffering**: Zero-fill + fresh audio after seek/clear.
 
 ### Stream lifecycle handling
 
-- **StreamStart**: Enter WaitingForSubscriber (or snap_to_live if subscriber already active)
+- **StreamStart**: Enter WaitingForSubscriber (or snap_to_live if TX already active)
 - **StreamStart (same format, already Running)**: Clear stale audio, enter Rebuffering
-- **StreamClear**: Zero-fill from read_pos, jump write_pos ahead, enter Rebuffering
-- **StreamEnd**: Zero entire ring, reset stream state, enter Idle (device stays on network)
-- **Sendspin disconnect**: Same as StreamEnd — zero ring, enter Idle, reconnect
-
-### Clear/Rebuffer behavior
-
-On stream/clear, the bridge must discard stale audio that inferno is about to read:
-
-1. Read `read_pos` from `PositionReportDestination`
-2. Zero-fill ring buffer positions `[read_pos, read_pos + prebuffer_target)`
-3. Set `write_pos = read_pos + prebuffer_target`
-4. Enter Rebuffering state
-
-This ensures inferno reads silence immediately (not stale pre-seek audio), then the bridge refills the jitter buffer with fresh data.
-
-### Subscriber reconnect alignment
-
-If a DANTE subscriber disconnects and reconnects (or a new subscriber joins while a stream is active), the bridge must ensure the subscriber hears current audio, not stale data left in the ring buffer from an earlier write position.
-
-The mechanism: when `read_pos` starts advancing at a new position (detected in WaitingForSubscriber or during Running state monitoring), `snap_to_live()` fires:
-
-1. Read the subscriber's current `read_pos`
-2. Zero-fill `[read_pos, read_pos + prebuffer_target)` — brief silence
-3. Set `write_pos = read_pos + prebuffer_target`
-4. Enter Prebuffering with fresh audio
-
-This anchors the bridge's write position to wherever the subscriber is reading NOW. The subscriber gets current audio with only a prebuffer-sized gap of silence (~50ms), regardless of how long the bridge was writing to the ring before the subscriber appeared.
-
-**Note:** This mechanism requires `read_pos` from `PositionReportDestination` to advance, which only happens when inferno's FlowsTransmitter has a valid PTP clock and is actively reading. In Docker test environments with the fake clock, the clock overlay may not propagate reliably to the FlowsTransmitter, so a 5-second timeout fallback enters Prebuffering without snap-to-live alignment. In production with a real PTP clock (Statime synced to DANTE hardware), snap_to_live works correctly.
+- **StreamClear**: Zero-fill from approximate read_pos, jump write_pos ahead, enter Rebuffering
+- **StreamEnd**: Fill ring with silence, reset stream state, enter Idle (device stays on network)
+- **Sendspin disconnect**: Same as StreamEnd — silence ring, enter Idle, reconnect
 
 ## Data Path
 
 1. Sendspin delivers `AudioChunk { data: Arc<[u8]> }` — raw PCM bytes over WebSocket
 2. Bridge parses bytes, deinterleaves (L/R), and shifts samples to inferno format
-3. Bridge writes via `Atomic::store()` into self-owned `Vec<Atomic<i32>>` ring buffers
-4. FlowsTransmitter reads via `Atomic::load()` at PTP-synchronized timestamps
-
-At stereo 48kHz 32-bit, that's ~384KB/s — negligible overhead.
+3. Bridge writes per-channel via `RBInput::write_from_at(write_pos, samples_iter)`
+4. FlowsTransmitter reads via `RBOutput::read_at()` at PTP-synchronized timestamps
 
 ## Sample Format Alignment
 
@@ -166,17 +145,38 @@ Lossless and bit-perfect for PCM.
 
 ## Jitter Buffer Monitoring
 
-Uses `PositionReportDestination` to get the actual read position from FlowsTransmitter.
-
-Periodic console metrics (every ~5s):
+The bridge approximates buffer fill from `write_pos - current_timestamp`. When `current_timestamp` is valid (not `usize::MAX`), metrics show:
 
 ```
-[buffer] fill=2412 target=2400 drift=+1.2ppm min=2388 max=2436 underruns=0 overruns=0
+[buffer] fill=2412 target=2400 drift=+1.2ppm write_pos=... read_pos=...
 ```
+
+When `current_timestamp` is not yet available:
+```
+[buffer] writing at N samples (read_pos not yet available)
+```
+
+**Note**: Fill and drift are approximate because `current_timestamp` is `min_next_ts`, not the actual ring read position. True buffer occupancy requires exposing the consumer cursor from the FlowsTransmitter (planned inferno fork enhancement).
+
+## PTP Clock Chain
+
+```
+DANTE devices ←PTP→ Statime (PTPv2 follower)
+                        │
+                        │ usrvclock (Unix datagram socket)
+                        ▼
+                  inferno AsyncClient (tokio task)
+                        │
+                        │ watch channel → RealTimeBoxReceiver
+                        ▼
+                  FlowsTransmitter (real-time thread)
+```
+
+**Only PTP followers export usrvclock overlays.** A PTP master doesn't adjust its clock, so the overlay export callback never fires. For Docker-only testing, use a PTPv2 master + follower pair. For production with DANTE hardware, Statime runs as PTPv1 follower syncing to the DANTE PTP master.
 
 ## Format Enforcement
 
-The bridge **rejects** streams at StreamStart that don't match:
+The bridge rejects streams at StreamStart that don't match:
 - Sample rate must be 48000 Hz
 - Channel count must be 2 (stereo)
 - Codec must be "pcm"
@@ -184,7 +184,7 @@ The bridge **rejects** streams at StreamStart that don't match:
 
 ## Reconnection
 
-The bridge has an outer reconnect loop. If the WebSocket drops (server restart, network issue), it zeros the ring buffer, enters Idle, waits 2 seconds, and reconnects. The DANTE device stays on the network — only the stream state resets.
+The bridge has an outer reconnect loop. If the WebSocket drops, it fills the ring with silence, enters Idle, waits 2 seconds, and reconnects. The DANTE device stays on the network — only the stream state resets.
 
 ## Codec Support
 
@@ -197,112 +197,44 @@ The bridge has an outer reconnect loop. If the WebSocket drops (server restart, 
 
 ## Multi-Stream Deployment
 
-One bridge process per Sendspin stream. For 32 streams: 32 containers, each with unique `--name`, `INFERNO_PROCESS_ID`, and `INFERNO_ALT_PORT`. Device ID is auto-derived from host IP + process ID.
+One bridge process per Sendspin stream. Each bridge needs unique `INFERNO_PROCESS_ID` and `INFERNO_ALT_PORT`. Device ID is auto-derived from host IP + process ID.
 
-## Configuration
+## Inferno Fork
 
-### CLI Arguments
-- `--url` / `-u`: Sendspin server WebSocket URL (required)
-- `--name` / `-n`: DANTE device name (default: "Sendspin Bridge")
-- `--buffer-ms`: Jitter buffer size in ms (default: 50)
+This project uses a fork of inferno_aoip that adds:
 
-### Environment Variables (passed through to inferno_aoip)
-- `INFERNO_CLOCK_PATH`, `INFERNO_SAMPLE_RATE`, `INFERNO_BIND_IP`
-- `INFERNO_PROCESS_ID`, `INFERNO_ALT_PORT` (required for multiple bridges on same host)
-- `INFERNO_TX_LATENCY_NS`
+- `transmit_from_owned_buffer()` — creates owned ring buffers and returns `RBInput` write handles
+- Re-exports: `OwnedBuffer`, `RBInput`, `RBOutput`, `new_owned_ring_buffer`
+
+The owned buffer path provides:
+- `readable_pos` tracking on the write side (inferno only reads validated data)
+- `unconditional_read() == false` (reads check readable_pos)
+- Hole detection and fill via `hole_fix_wait`
+
+The fork does NOT yet expose the consumer-side read position. The bridge uses `current_timestamp` as an approximation.
 
 ## Lessons Learned
 
-Hard-won knowledge from development and testing. Read this before modifying the clock or buffer logic.
-
-### The PTP clock chain
-
-```
-DANTE devices ←PTP→ Statime daemon
-                        │
-                        │ usrvclock (Unix datagram socket)
-                        ▼
-                  inferno AsyncClient (tokio task)
-                        │
-                        │ watch::Sender<Option<ClockOverlay>>
-                        ▼
-                  watch::Receiver (per subscriber)
-                        │
-                        │ RealTimeBoxReceiver (lock-free channel)
-                        ▼
-                  FlowsTransmitter (real-time thread, priority 81)
-```
-
-Statime syncs with PTP masters on the network and exports a `ClockOverlay` (shift + frequency offset) via the usrvclock protocol. Inferno's `AsyncClient` receives this and publishes it through a `watch` channel. The `FlowsTransmitter` reads it via a `RealTimeBoxReceiver` designed for RT threads.
-
 ### Why "start at zero" instead of PTP-anchored start_time
 
-The original plan was to obtain the PTP media clock time and send it as `start_time` to anchor ring buffer positions to PTP time. This failed because:
+Getting a PTP media clock time to send as `start_time` proved unreliable:
+1. `get_realtime_clock_receiver()` uses a `RealTimeBoxReceiver` that requires the sender to keep sending for the receiver to see updates
+2. `make_shared_media_clock()` returns immediately without waiting for the first overlay
+3. `current_timestamp` is only set after `start_time` is received (chicken-and-egg)
 
-1. **`get_realtime_clock_receiver()` doesn't reliably deliver overlays on single-threaded tokio.** The method creates a `RealTimeBoxReceiver` fed by a background tokio task. On a `current_thread` runtime, this task only runs when the main code yields. Polling in a loop with `yield_now()` + `sleep()` should work but the initial overlay was frequently `None`.
+Sending `start_time = 0` avoids all three issues. The tradeoff is that ring buffer positions are in our local domain (0, 1, 2...) rather than the PTP domain.
 
-2. **Chicken-and-egg with `current_timestamp`.** The `FlowsTransmitter` only writes to `current_timestamp` after receiving `start_time`, but we wanted to use `current_timestamp` to compute `start_time`.
+### TMPDIR must be on a shared volume
 
-The "start at zero" model avoids both problems: send `start_time=0` immediately, let the transmitter start, and write at monotonically increasing positions. Since `ExternalBuffer::unconditional_read()` returns `true`, inferno reads any ring buffer position without checking write status — our writes just need to stay ahead of reads.
-
-### Why Statime can't be a standalone PTP master in Docker
-
-Only PTP **followers** export usrvclock overlays. A PTP master doesn't adjust its clock (it IS the reference), so the overlay export callback never fires. This is true regardless of whether the master has followers or not.
-
-For production, you need:
-1. A PTP master on the network (DANTE hardware, or Statime in PTPv2 master mode)
-2. A Statime **follower** that syncs to the master and exports usrvclock
-
-The `fake_usrvclock_server` (used in `make test`) sidesteps this by sending periodic overlays unconditionally (every 1 second), but the overlay values are not PTP-synchronized — they're based on `CLOCK_MONOTONIC_RAW` with zero offset.
-
-For Docker-only testing with real PTP: `make test-ptpv2` runs a Statime master + follower pair. The follower syncs to the master and exports valid overlays.
-
-### PositionReportDestination limitation
-
-Inferno's `ExternalBuffer::unconditional_read()` returns `true`, which skips the `readable_pos` update in `RBOutput::read_at()`. This means `PositionReportDestination` is never updated for our ExternalBuffer-based ring buffers, even when the FlowsTransmitter IS actively reading and sending packets.
-
-Consequence: `read_pos` from PositionReportDestination is always 0. Buffer metrics (fill, drift, subscriber detection via read_pos) are unreliable. The WaitingForSubscriber snap_to_live mechanism cannot trigger. Audio flows correctly regardless — this only affects observability.
-
-### Why VMs and Docker virtual NICs break Statime identity
-
-Statime derives its PTP clock identity from the NIC's MAC address, filtering out locally-administered MACs (bit 1 of first octet set). Docker's virtual NICs (`02:xx:xx`) and many VM hypervisors generate locally-administered MACs, causing `get_clock_id()` to find no valid MAC and panic.
-
-Statime has an `identity` config key for manual override, but as of the inferno-dev branch, the code uses `unwrap_or` (eager evaluation) instead of `unwrap_or_else` (lazy), so `get_clock_id()` panics even when `identity` is set. This is an upstream bug.
-
-### Why TMPDIR must be on a shared volume
-
-The usrvclock protocol uses Unix datagram sockets. The client (bridge) creates a socket at `$TMPDIR/usrvclock-client.{PID}.{N}`. The server (Statime) discovers this path via `recvfrom()` and sends overlays back to it via `sendto()`.
-
-Docker containers have isolated filesystems even with host networking (`network_mode: host` only shares the network namespace, not the mount namespace). If TMPDIR is container-local `/tmp`, Statime cannot reach the bridge's client socket. The shared volume makes these paths visible across containers.
-
-Each bridge needs a unique TMPDIR subdirectory because container main processes are typically PID 1, which would cause socket name collisions.
+The usrvclock protocol uses Unix datagram sockets. Client sockets are created in `$TMPDIR`. Docker containers have isolated filesystems even with host networking, so the socket files must be on a shared volume for Statime to reach them. Each bridge needs a unique TMPDIR subdirectory (PIDs overlap across containers).
 
 ### DANTE device naming
 
-Inferno uses two hostnames:
-
-- **`friendly_hostname`**: What shows in Dante Controller. Comes from the `NAME` config key (our `--name` arg). If not set, defaults to `"{app_name} {hex_ip}"` (e.g., "SSBridge ac150004").
-- **`factory_hostname`**: Used for mDNS: `"{short_name}-{hex_device_id}"`.
-
-The device ID is auto-derived: `0000<IP_bytes><PROCESS_ID_bytes>`. With host networking, all bridges share the same IP, so `PROCESS_ID` is what makes each device unique.
-
-### Sendspin protocol reality
-
-- **sendspin-rs v0.1** only has a PCM decoder ("Phase 1: PCM only"). FLAC is planned but not implemented.
-- `AudioChunk` delivers **raw bytes** (`data: Arc<[u8]>`), not decoded samples. For PCM, we parse the bytes directly. For FLAC, we'd need our own decoder.
-- The Sendspin protocol spec mentions a `codec_header` field in StreamStart for codecs like FLAC, but the framing of FLAC data within audio chunks is not well-specified.
-- `sendspin serve` (the Python CLI) sends PCM when given a local WAV file. The codec is server-decided; the client cannot request a specific codec.
-- The `split()` method on `ProtocolClient` returns a tuple `(messages, audio, clock_sync, sender, guard)`, not a struct with named fields.
-
-### ExternalBuffer unconditional_read()
-
-This is critical to understanding the bridge's clock model. When `unconditional_read()` returns `true` (which it does for `ExternalBuffer`), inferno's `RBOutput::read_at()` reads from any ring buffer position without checking `readable_pos` or `writing_pos`. It trusts that the external writer (our bridge) has placed valid data there.
-
-This means inferno reads at `(ptp_time - start_time - latency) % RING_BUFFER_SIZE` regardless of what we've written. Our job is simply to keep writing ahead of the read position.
+Inferno uses `friendly_hostname` from the `NAME` config key (our `--name` arg). Without it, the default is `"{app_name} {hex_ip}"`. The device ID is auto-derived from `IP + PROCESS_ID`.
 
 ## Future Work
 
+- **True consumer position**: Expose `start_ts` or `timestamp_shift` from FlowsTransmitter so the bridge can write at PTP-domain positions
 - **FLAC support**: When sendspin-rs gains FLAC decoding
-- **Sendspin clock_sync**: Monitor for drift detection
-- **Drift compensation**: Sample insertion/dropping when fill deviates
+- **Drift compensation**: Sample insertion/dropping when fill deviates from target
 - **Prometheus metrics**: Production monitoring endpoint
