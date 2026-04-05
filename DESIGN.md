@@ -224,7 +224,7 @@ One bridge process per Sendspin stream. Each bridge needs unique `INFERNO_PROCES
 
 ## Inferno Fork
 
-This project uses a fork of inferno_aoip that adds:
+This project uses a [fork of inferno_aoip](https://github.com/salanki/inferno/tree/spin2dante-owned-buffer) that adds:
 
 - `transmit_from_owned_buffer()` — creates owned ring buffers and returns `RBInput` write handles
 - Re-exports: `OwnedBuffer`, `RBInput`, `RBOutput`, `new_owned_ring_buffer`
