@@ -3,6 +3,7 @@ set -e
 
 STREAM_COUNT=16
 RECORD_SECS=20
+COMPARE_JSON=/tmp/compare_results.jsonl
 
 echo "=== spin2dante Multi-Stream E2E Test (${STREAM_COUNT} streams) ==="
 echo "Waiting for all DANTE devices to appear..."
@@ -68,8 +69,9 @@ echo "=== Analyzing ${STREAM_COUNT} capture files ==="
 
 total=0
 ok=0
-signal_present=0
+bit_perfect=0
 min_size=$((5 * 48000 * 2 * 4))  # at least 5s of audio
+rm -f "$COMPARE_JSON"
 
 for i in $(seq 1 $STREAM_COUNT); do
     total=$((total + 1))
@@ -89,103 +91,79 @@ for i in $(seq 1 $STREAM_COUNT); do
 
     ok=$((ok + 1))
 
-    # Signal check — scan up to 30s into the file (audio may start late)
-    has_signal=$(python3 -c "
-import struct
-with open('$file', 'rb') as f:
-    data = f.read(48000 * 8 * 30)  # up to 30s of stereo 32-bit
-nonzero = sum(1 for i in range(0, len(data), 4) if struct.unpack_from('<i', data, i)[0] != 0)
-print('YES' if nonzero > 100 else 'NO')
-" 2>/dev/null || echo "ERR")
-
-    if [ "$has_signal" = "YES" ]; then
-        signal_present=$((signal_present + 1))
-        echo "  capture_${padded}.raw: ${size} bytes, signal=YES"
+    if python3 /audio_compare.py \
+        --reference /shared/reference_capture.raw \
+        --capture "$file" \
+        --label "capture_${padded}" \
+        --min-run-seconds 5 \
+        --json > /tmp/compare_${padded}.json
+    then
+        bit_perfect=$((bit_perfect + 1))
+        cat /tmp/compare_${padded}.json >> "$COMPARE_JSON"
+        echo "  capture_${padded}.raw: ${size} bytes, bit-perfect overlap=YES"
     else
-        echo "  capture_${padded}.raw: ${size} bytes, signal=${has_signal}"
+        cat /tmp/compare_${padded}.json >> "$COMPARE_JSON" 2>/dev/null || true
+        echo "  capture_${padded}.raw: ${size} bytes, bit-perfect overlap=NO"
     fi
 done
 
 echo ""
 echo "=== Cross-stream comparison ==="
-echo "Comparing captures pairwise to check synchronization..."
+echo "Comparing source offsets to check synchronization..."
 
-# Compare first capture to all others by looking for the 1kHz sine onset.
-# In a perfectly synchronized group, all captures should have nearly identical content.
 python3 -c "
-import struct, math
+import json
+from statistics import mean
 
-def read_samples(path, max_frames=48000*30):
-    \"\"\"Read left-channel samples as i32 values (up to 30s).\"\"\"
-    samples = []
-    try:
-        with open(path, 'rb') as f:
-            data = f.read(max_frames * 8)  # stereo 32-bit = 8 bytes/frame
-        for i in range(0, len(data), 8):  # step by frame (L+R)
-            if i + 4 <= len(data):
-                samples.append(struct.unpack_from('<i', data, i)[0])
-    except FileNotFoundError:
-        pass
-    return samples
+results = []
+try:
+    with open('$COMPARE_JSON', 'r') as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                results.append(json.loads(line))
+except FileNotFoundError:
+    pass
 
-def find_first_nonzero(samples, threshold=1000):
-    \"\"\"Find index of first sample above threshold.\"\"\"
-    for i, s in enumerate(samples):
-        if abs(s) > threshold:
-            return i
-    return -1
-
-def peak_of(samples):
-    if not samples:
-        return 0
-    return max(abs(s) for s in samples)
-
-ref_path = '/shared/capture_01.raw'
-ref = read_samples(ref_path)
-ref_onset = find_first_nonzero(ref)
-ref_peak = peak_of(ref)
-
-if not ref or ref_onset < 0:
-    print('Reference capture (01) has no signal, cannot compare.')
+if not results:
+    print('No successful overlap comparison results available.')
 else:
-    print(f'Reference (01): onset at sample {ref_onset}, peak={ref_peak}')
+    results.sort(key=lambda item: item['label'])
+    ref = results[0]
+    print(f\"Reference ({ref['label']}): offset={ref['offset_frames']} frames ({ref['offset_ms']:+.2f}ms)\")
     print()
-
     offsets = []
-    for i in range(2, $STREAM_COUNT + 1):
-        path = f'/shared/capture_{i:02d}.raw'
-        s = read_samples(path)
-        onset = find_first_nonzero(s)
-        peak = peak_of(s)
-
-        if onset < 0:
-            print(f'  capture_{i:02d}: no signal')
-        else:
-            offset = onset - ref_onset
-            offsets.append(offset)
-            offset_ms = offset / 48.0
-            print(f'  capture_{i:02d}: onset at {onset}, offset={offset:+d} samples ({offset_ms:+.2f}ms), peak={peak}')
+    for item in results[1:]:
+        relative = item['offset_frames'] - ref['offset_frames']
+        offsets.append(relative)
+        print(
+            f\"  {item['label']}: source offset={item['offset_frames']:+d} frames \"
+            f\"({item['offset_ms']:+.2f}ms), relative={relative:+d} frames ({relative/48.0:+.2f}ms), \"
+            f\"run={item['longest_run_seconds']:.2f}s\"
+        )
 
     if offsets:
         print()
-        min_off = min(offsets)
-        max_off = max(offsets)
-        spread = max_off - min_off
-        avg_off = sum(offsets) / len(offsets)
-        print(f'Onset spread: {spread} samples ({spread/48.0:.2f}ms)')
-        print(f'Min offset: {min_off:+d}, Max offset: {max_off:+d}, Avg: {avg_off:+.1f}')
-        if spread < 480:  # < 10ms
-            print('SYNC: GOOD (spread < 10ms)')
-        elif spread < 4800:  # < 100ms
-            print('SYNC: FAIR (spread < 100ms)')
+        spread = max(offsets) - min(offsets)
+        avg_off = mean(offsets)
+        print(f'Source-offset spread: {spread} frames ({spread/48.0:.2f}ms)')
+        print(f'Min relative offset: {min(offsets):+d}, Max relative offset: {max(offsets):+d}, Avg: {avg_off:+.1f}')
+        if spread < 48:  # < 1ms
+            print('SYNC: GOOD (spread < 1ms)')
+        elif spread < 480:  # < 10ms
+            print('SYNC: FAIR (spread < 10ms)')
         else:
-            print('SYNC: POOR (spread >= 100ms)')
+            print('SYNC: POOR (spread >= 10ms)')
 " || echo "Cross-stream comparison failed"
 
 echo ""
 echo "=== Summary ==="
 echo "Streams: ${STREAM_COUNT}"
 echo "Captures present: ${ok}/${total}"
-echo "Signal present: ${signal_present}/${total}"
+echo "Bit-perfect overlap: ${bit_perfect}/${total}"
+if [ "$bit_perfect" -ne "$total" ]; then
+    echo "FAIL: not all captures produced a bit-perfect overlap"
+    exit 1
+fi
 echo ""
 echo "=== Multi-stream test complete ==="

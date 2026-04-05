@@ -51,7 +51,10 @@ services:
   # Sendspin test source
   sendspin_source:
     build:
-      context: ./sendspin_source
+      context: .
+      dockerfile: ./sendspin_source/Dockerfile
+    volumes:
+      - shared:/shared
     networks:
       - audio_net
     depends_on:
@@ -111,7 +114,8 @@ services:
   # Test orchestrator
   control_and_test:
     build:
-      context: ./control_and_test
+      context: .
+      dockerfile: ./control_and_test/Dockerfile
     volumes:
       - shared:/shared
     networks:

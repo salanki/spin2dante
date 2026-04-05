@@ -52,9 +52,11 @@ sleep 20
 
 echo ""
 echo "=== Checking capture file ==="
-if [ -f /shared/capture.raw ]; then
+if [ -f /shared/capture.raw ] && [ -f /shared/reference_capture.raw ]; then
     size=$(stat -c %s /shared/capture.raw 2>/dev/null || stat -f %z /shared/capture.raw)
+    ref_size=$(stat -c %s /shared/reference_capture.raw 2>/dev/null || stat -f %z /shared/reference_capture.raw)
     echo "Capture file size: $size bytes"
+    echo "Reference file size: $ref_size bytes"
 
     min_size=$((5 * 48000 * 2 * 4))
     if [ "$size" -lt "$min_size" ]; then
@@ -64,33 +66,16 @@ if [ -f /shared/capture.raw ]; then
     fi
 
     echo ""
-    echo "=== Signal analysis ==="
-    python3 -c "
-import struct, math
-
-with open('/shared/capture.raw', 'rb') as f:
-    data = f.read()
-
-samples = len(data) // 4
-nonzero = 0
-peak = 0
-for i in range(min(samples, 480000)):
-    val = struct.unpack_from('<i', data, i * 4)[0]
-    if val != 0:
-        nonzero += 1
-    peak = max(peak, abs(val))
-
-print(f'Total samples: {samples}')
-print(f'Non-zero samples (first 10s): {nonzero}/{min(samples, 480000)}')
-if peak > 0:
-    print(f'Peak value: {peak} ({20 * math.log10(peak / 2147483647):.1f} dBFS)')
-else:
-    print('Peak: 0 (silence)')
-print(f'Signal present: {\"YES\" if nonzero > 1000 else \"NO\"}')
-" || echo "Signal analysis failed"
+    echo "=== Overlap comparison ==="
+    python3 /audio_compare.py \
+        --reference /shared/reference_capture.raw \
+        --capture /shared/capture.raw \
+        --label capture.raw \
+        --min-run-seconds 5
 
 else
-    echo "NOTE: no capture file yet (subscriptions may not have been established)"
+    echo "NOTE: capture or reference file missing"
+    exit 1
 fi
 
 echo ""
