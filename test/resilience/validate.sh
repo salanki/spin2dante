@@ -36,11 +36,11 @@ else
     echo "  FAIL: no stream/end seen"
 fi
 
-# Check: bridge entered idle then restarted
-if grep -q "stopping DANTE transmitter" "$log"; then
-    echo "  PASS: transmitter stopped on stream/end"
+# Check: bridge entered idle (device stays on network, TX not stopped)
+if grep -q "entering idle" "$log"; then
+    echo "  PASS: entered idle on stream/end (device stays on network)"
 else
-    echo "  FAIL: transmitter not stopped"
+    echo "  FAIL: did not enter idle"
 fi
 
 # Check: second stream/start worked

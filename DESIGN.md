@@ -36,7 +36,33 @@ Sendspin Server (Music Assistant)
 
 The bridge uses a fork of inferno_aoip that adds `transmit_from_owned_buffer()` — a method that creates owned ring buffers with proper `readable_pos` tracking and returns `RBInput` write handles to the caller.
 
-## Clock Model
+## Two-Layer Sync Architecture
+
+The bridge uses two independent sync mechanisms:
+
+1. **PTP/DANTE layer**: determines WHERE in the ring buffer audio lands (PTP-domain positions)
+2. **Sendspin timestamp layer**: determines WHICH audio chunk corresponds to "now" (cross-bridge convergence)
+
+### Sendspin Timestamp Sync
+
+Each `AudioChunk` carries a presentation timestamp (`timestamp: i64`, server clock microseconds — "when the first sample should be output"). When `ClockSync` is synchronized, the bridge maps each chunk to a specific ring buffer position:
+
+```
+anchor_ring_pos = read_position + prebuffer_target
+target = anchor_ring_pos + (chunk.timestamp - anchor_server_us) * SAMPLE_RATE / 1_000_000
+```
+
+This ensures all bridges receiving the same Sendspin stream write the same audio at the same ring positions (same Sendspin timestamps → same delta → same target). Cross-bridge sync target: < 1ms (< 48 samples).
+
+**Chunk decisions** (ring position is the truth):
+- `target + frames ≤ read_pos` → drop (entirely consumed)
+- `target < read_pos < target + frames` → trim stale prefix, write remainder
+- `target far ahead of write frontier` → re-anchor (intentional discontinuity)
+- Otherwise → write at target
+
+**Fallback**: if `ClockSync` hasn't converged yet (e.g., early in the session before time sync completes), the bridge writes sequentially at `write_pos`. Once sync converges, the anchor is set and timestamp-driven positioning activates automatically. The `sendspin serve` CLI and Music Assistant both support time sync.
+
+## PTP Clock Model
 
 ### Overview
 
@@ -56,17 +82,15 @@ The bridge writes at positions in its own domain (0, 1, 2, ...) while the FlowsT
 - Our `write_pos` starts at 0 and increments monotonically
 - Inferno's `start_ts` (read position) is `next_ts + timestamp_shift`, where `next_ts` is a PTP timestamp
 
-With owned buffers (`unconditional_read = false`), inferno checks `readable_pos` before reading. If the transmitter's `start_ts` is outside the range we've written, it reads zeros. This is why the current implementation produces very quiet audio — mostly zeros with occasional valid samples where positions happen to overlap modulo ring buffer size.
+With owned buffers (`unconditional_read = false`), inferno checks `readable_pos` before reading. If the transmitter's `start_ts` is outside the range we've written, it reads zeros. The inferno fork now exposes that true consumer read position so the bridge can align writes to the actual PTP-domain read cursor instead of guessing from an approximation.
 
-**Status: WIP.** The fix requires exposing the actual consumer read position (or `timestamp_shift`) from the FlowsTransmitter, so the bridge can write at the correct PTP-domain positions. This is a planned addition to the inferno fork.
+### Read position tracking
 
-### Read position approximation
+The inferno fork exposes the actual TX-side consumer cursor by publishing `start_ts` from the FlowsTransmitter. The bridge uses that true read position for:
 
-Until the true consumer position is exposed, the bridge uses `current_timestamp` (an atomic updated by the FlowsTransmitter) as an approximation. This value is `min_next_ts` — the earliest pending TX timestamp — not the actual `start_ts` used for ring reads. The approximation is biased by TX latency but provides directionally correct information for:
-
-- `snap_to_live()`: aligning write_pos to approximately where inferno reads
-- `WaitingForSubscriber`: detecting when the FlowsTransmitter starts operating
-- Buffer fill estimation (approximate, not exact)
+- `snap_to_live()`: aligning `write_pos` to where inferno will actually read next
+- `WaitingForSubscriber`: detecting when the FlowsTransmitter has started consuming
+- Buffer fill estimation against the real consumer cursor
 
 ## Device Lifetime
 
@@ -83,12 +107,13 @@ The DANTE device (DeviceServer + TX) is started **once at process startup** and 
 
 ### WaitingForSubscriber and timeout fallback
 
-When a stream starts, the bridge writes audio via `RBInput::write_from_at()`. It monitors `current_timestamp` to detect when the FlowsTransmitter is operating:
+When a stream starts, the bridge writes audio via `RBInput::write_from_at()`. It monitors `read_position` (the true consumer cursor from the FlowsTransmitter) to detect when reading begins:
 
-- If `current_timestamp` changes from `usize::MAX` → snap_to_live()
+- If `read_position` becomes valid (non-zero, non-MAX) → snap_to_live()
+- If write/read domain misalignment detected (distance > ring buffer size) → snap_to_live() immediately
 - If no change within 5 seconds → fall back to Prebuffering without alignment
 
-The timeout fallback is pragmatic for environments where the PTP clock takes time to propagate to the FlowsTransmitter.
+The auto-realignment handles PTP clock warmup: the bridge starts writing at local domain 0, then snaps to the PTP domain once `read_position` shows where inferno is actually reading.
 
 ## State Machine
 
@@ -145,18 +170,16 @@ Lossless and bit-perfect for PCM.
 
 ## Jitter Buffer Monitoring
 
-The bridge approximates buffer fill from `write_pos - current_timestamp`. When `current_timestamp` is valid (not `usize::MAX`), metrics show:
+The bridge computes buffer fill from `write_pos - read_position`, where `read_position` is the true consumer cursor from the FlowsTransmitter (exposed via the inferno fork). When `read_position` is valid:
 
 ```
-[buffer] fill=2412 target=2400 drift=+1.2ppm write_pos=... read_pos=...
+[buffer] fill=4128 target=2400 drift=+133.3ppm write_pos=140477176352 read_pos=140477172224
 ```
 
-When `current_timestamp` is not yet available:
+When `read_position` is not yet available (PTP clock warming up):
 ```
 [buffer] writing at N samples (read_pos not yet available)
 ```
-
-**Note**: Fill and drift are approximate because `current_timestamp` is `min_next_ts`, not the actual ring read position. True buffer occupancy requires exposing the consumer cursor from the FlowsTransmitter (planned inferno fork enhancement).
 
 ## PTP Clock Chain
 
@@ -201,7 +224,7 @@ One bridge process per Sendspin stream. Each bridge needs unique `INFERNO_PROCES
 
 ## Inferno Fork
 
-This project uses a fork of inferno_aoip that adds:
+This project uses a [fork of inferno_aoip](https://github.com/salanki/inferno/tree/spin2dante-owned-buffer) that adds:
 
 - `transmit_from_owned_buffer()` — creates owned ring buffers and returns `RBInput` write handles
 - Re-exports: `OwnedBuffer`, `RBInput`, `RBOutput`, `new_owned_ring_buffer`
@@ -210,9 +233,9 @@ The owned buffer path provides:
 - `readable_pos` tracking on the write side (inferno only reads validated data)
 - `unconditional_read() == false` (reads check readable_pos)
 - Hole detection and fill via `hole_fix_wait`
-- TX packetization with dithering disabled, so 24-bit PCM can be validated bit-for-bit over the received overlap
+- Configurable TX dithering, with spin2dante explicitly disabling the 24-bit path so PCM payloads can be validated bit-for-bit over the received overlap
 
-The fork does NOT yet expose the consumer-side read position. The bridge uses `current_timestamp` as an approximation.
+The fork exposes `read_position` — the actual `start_ts` the FlowsTransmitter uses for ring reads. The bridge uses this for snap_to_live alignment and buffer metrics.
 
 ## Lessons Learned
 
@@ -235,7 +258,7 @@ Inferno uses `friendly_hostname` from the `NAME` config key (our `--name` arg). 
 
 ## Future Work
 
-- **True consumer position**: Expose `start_ts` or `timestamp_shift` from FlowsTransmitter so the bridge can write at PTP-domain positions
+- **Cross-correlation sync validation**: The multi-stream onset measurement (116ms spread) reflects PTP warmup variance, not sync failure. True < 1ms validation needs audio content cross-correlation between captures.
 - **FLAC support**: When sendspin-rs gains FLAC decoding
 - **Drift compensation**: Sample insertion/dropping when fill deviates from target
 - **Prometheus metrics**: Production monitoring endpoint

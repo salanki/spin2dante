@@ -59,7 +59,7 @@ Notes:
 # Single-stream E2E test (1 bridge, 1 receiver)
 make test
 
-# Multi-stream E2E test (4 bridges in one Sendspin group, 4 receivers)
+# Multi-stream E2E test (16 bridges in one Sendspin group, 16 receivers)
 make test-multi
 
 # Override inferno location if needed
@@ -70,27 +70,27 @@ The Makefile handles building the bridge image, the inferno2pipe image (with sub
 
 ## Test Architecture
 
-Six Docker containers on a shared bridge network:
+Seven Docker containers on a shared bridge network (single-stream test):
 
 ```
-┌──────────────┐  ┌──────────────────┐  ┌───────────────┐
-│ clock_source │  │ sendspin_source   │  │ control_and_  │
-│ (usrvclock)  │  │ (Python sendspin) │  │ test          │
-│ PTP clock    │  │ 1kHz sine WAV    │  │ (netaudio +   │
-│ for all      │  │ served via WS    │  │  signal check)│
-└──────┬───────┘  └────────┬─────────┘  └───────┬───────┘
-       │                   │ WebSocket           │ netaudio
-       │    ┌──────────────▼───────────┐         │ subscription
-       ├───→│     bridge               │         │
-       │    │  (spin2dante)       │◄────────┘
-       │    │  DANTE TX: "SSBridge"    │
-       │    └──────────────┬───────────┘
-       │                   │ DANTE multicast UDP
-       │    ┌──────────────▼───────────┐
-       └───→│     i2pipe               │
-            │  (inferno2pipe)          │
-            │  captures to .raw file   │
-            └──────────────────────────┘
+┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  ┌───────────────┐
+│ ptp-master   │  │ ptp-follower │  │ sendspin_source   │  │ control_and_  │
+│ (PTPv2 ref)  │→ │ usrvclock     │  │ deterministic     │  │ test          │
+│              │  │ exporter      │  │ 24-bit reference  │  │ (netaudio +   │
+└──────────────┘  └──────┬───────┘  │ WAV via WS        │  │ overlap check)│
+                         │          └────────┬─────────┘  └───────┬───────┘
+                         │                   │ WebSocket           │ netaudio
+                         │    ┌──────────────▼───────────┐         │ subscription
+                         ├───→│     bridge               │         │
+                         │    │  (spin2dante)            │◄────────┘
+                         │    │  DANTE TX: "SSBridge"    │
+                         │    └──────────────┬───────────┘
+                         │                   │ DANTE multicast UDP
+                         │    ┌──────────────▼───────────┐
+                         └───→│     i2pipe               │
+                              │  (inferno2pipe)          │
+                              │  captures to .raw file   │
+                              └──────────────────────────┘
 ```
 
 ### Container Details
@@ -100,7 +100,7 @@ Six Docker containers on a shared bridge network:
 | `init` | `alpine:3` | Clears the shared volume before each run |
 | `ptp-master` | Built from `statime/` | PTPv2 clock master (reference clock) |
 | `ptp-follower` | Built from `statime/` | PTPv2 clock follower — syncs to master, exports usrvclock |
-| `sendspin_source` | `python:3.13-alpine` + `pip install sendspin` | Generates a 30s 1kHz sine WAV, serves it via `sendspin serve` on port 8927 |
+| `sendspin_source` | `python:3.13-alpine` + `pip install sendspin` | Generates a deterministic 30s 24-bit stereo reference WAV and matching capture-domain raw reference, serves the WAV via `sendspin serve` on port 8927 |
 | `bridge` | Built from this repo's `Dockerfile` | The bridge under test. Connects to sendspin_source, transmits as DANTE device "SSBridge" |
 | `i2pipe` | `inferno_aoip:alpine-i2pipe` (pre-built) | DANTE receiver. Captures audio to `/shared/capture.raw` |
 | `control_and_test` | `python:3.13-alpine` + `netaudio` | Orchestrator: discovers DANTE devices, creates subscriptions, validates captured audio |
@@ -109,7 +109,7 @@ Six Docker containers on a shared bridge network:
 
 The Statime PTP follower exports clock overlays via Unix datagram sockets (usrvclock protocol). The server creates a socket at `/shared/usrvclock`. Each client (bridge, i2pipe) creates a response socket in `$TMPDIR`. The server sends clock overlays back to these client sockets.
 
-**The client TMPDIR must be on the shared Docker volume.** If TMPDIR is `/tmp` (container-local), the clock_source container can't reach the client sockets and you get:
+**The client TMPDIR must be on the shared Docker volume.** If TMPDIR is `/tmp` (container-local), the PTP follower container can't reach the client sockets and you get:
 
 ```
 ptp-follower  | sendto failed: No such file or directory
@@ -126,8 +126,6 @@ bridge:
   entrypoint: ["/bin/sh", "-c"]
   command: ["mkdir -p /shared/tmp_bridge && exec spin2dante ..."]
 ```
-
-The clock_source also needs `USRVCLOCK_SOCKET=/shared/usrvclock` set explicitly.
 
 ## Critical: inferno2pipe Image Must Be Pre-Built
 
@@ -149,7 +147,7 @@ failed to read `/build/searchfire/Cargo.toml`: No such file or directory
 
 The containers start in dependency order, but some take time to initialize:
 
-1. **sendspin_source** (~5-10s): generates 30s WAV test tone, starts sendspin server (pip install happens at image build time)
+1. **sendspin_source** (~5-10s): generates the deterministic reference WAV + `/shared/reference_capture.raw`, then starts sendspin server (pip install happens at image build time)
 2. **bridge** retries connection every 2s until sendspin_source is ready
 3. **i2pipe** sleeps 5s before starting (gives bridge time to register as DANTE device)
 4. **FlowsTransmitter** may log "clock unavailable" for ~10-20s until it receives its first PTP overlay
@@ -194,7 +192,7 @@ bridge  | starting FlowsTransmitter (start_time=0)
 bridge  | prebuffer complete (2400 samples written), fill=..., now transmitting
 bridge  | [buffer] fill=... target=2400 ...
 
-control_and_test | Signal present: YES
+control_and_test | [capture.raw] bit-perfect overlap found
 control_and_test | Capture file size OK
 ```
 
@@ -202,9 +200,9 @@ control_and_test | Capture file size OK
 ```
 bridge  | clock unavailable, can't transmit     # Normal at startup, bad if persistent
 bridge  | rejecting stream: ...                  # Format mismatch
-clock_source | sendto failed                     # TMPDIR not on shared volume
+ptp-follower | sendto failed                     # TMPDIR not on shared volume
 control_and_test | TIMEOUT: devices not found    # Network or startup issue
-control_and_test | Signal present: NO            # Audio not flowing
+control_and_test | no exact alignment window found  # audio missing or corrupted
 ```
 
 ### Capture file format
@@ -232,7 +230,7 @@ Useful for debugging when `docker compose up` doesn't give you enough control:
 cd test
 
 # 1. Start infrastructure
-docker compose up -d init clock_source sendspin_source
+docker compose up -d init ptp-master ptp-follower sendspin_source
 
 # 2. Wait for sendspin to be ready (~20s)
 sleep 20
@@ -275,33 +273,33 @@ The `--build` flag rebuilds changed images. The bridge Dockerfile doesn't cache 
 
 ## Multi-Stream Test (`make test-multi`)
 
-Tests 4 bridge instances all connected to the same Sendspin server, simulating a real multi-room deployment where all zones play the same stream in sync.
+Tests 16 bridge instances all connected to the same Sendspin server, simulating a real multi-room deployment where all zones play the same stream in sync.
 
 ### What it does
 
-- 1 Sendspin server serving a 1kHz test tone
-- 4 bridge containers (SS01–SS04), each a separate DANTE TX device
-- 4 i2pipe containers (rx01–rx04), each capturing one bridge's output
-- 1 control container that creates all 8 subscriptions and analyzes results
+- 1 Sendspin server serving the deterministic reference signal
+- 16 bridge containers (SS01–SS16), each a separate DANTE TX device
+- 16 i2pipe containers (rx01–rx16), each capturing one bridge's output
+- 1 control container that creates all 32 subscriptions and analyzes results
 
 ### What it measures
 
-1. **Signal presence**: Each of the 4 captures is checked for non-zero audio
-2. **Cross-stream sync**: Compares the onset (first non-zero sample) across all 4 captures and reports the spread in samples and milliseconds
+1. **Bit-perfect overlap**: Each capture is aligned against the shared reference signal and must contain one continuous exact match region
+2. **Cross-stream sync**: Compares the source-alignment offsets across all captures and reports the spread in samples and milliseconds
 
 ```
-Onset spread: 48 samples (1.00ms)
-SYNC: GOOD (spread < 10ms)
+Source-offset spread: 24 frames (0.50ms)
+SYNC: GOOD (spread < 1ms)
 ```
 
 Sync quality thresholds:
-- **GOOD**: < 10ms spread (< 480 samples)
-- **FAIR**: < 100ms spread
-- **POOR**: >= 100ms spread
+- **GOOD**: < 1ms spread (< 48 samples)
+- **FAIR**: < 10ms spread (< 480 samples)
+- **POOR**: >= 10ms spread
 
 ### Resource requirements
 
-35 containers total (16 bridges + 16 receivers + clock + source + control). Each inferno DeviceServer uses a real-time thread. Expect:
+37 containers total (16 bridges + 16 receivers + init + ptp-master + ptp-follower + source + control). Each inferno DeviceServer uses a real-time thread. Expect:
 - ~2-3GB RAM
 - Significant CPU during startup (all containers building/initializing in parallel)
 - ~3-4 minutes total runtime (builds + discovery timeout + 20s recording)
@@ -371,8 +369,8 @@ Tested and validated via `make test-resilience`:
 
 ## Known Limitations
 
-- **No automated pass/fail**: The test checks signal presence but doesn't verify bit-perfect output or exact waveform shape. WavDiff comparison is planned.
+- **Bit-perfect over overlap, not full-boundary perfection**: The automated check allows an unknown dropped prefix/suffix. It proves the received overlap matches exactly, but it does not require sample 0 of the source to be present.
 - **Sendspin source codec**: The `sendspin serve` command decides the codec. With a local WAV file it typically sends PCM, but behavior may vary by version.
 - **PTP clock warmup**: 10-15s of "clock unavailable" is normal while the Statime follower syncs to the master. The bridge auto-realigns once the clock becomes available.
-- **Single-run test audio**: The 30s test tone loops only if sendspin loops it. After 30s, the stream may end.
+- **Single-run test audio**: The 30s deterministic reference loops only if sendspin loops it. After 30s, the stream may end.
 - **FLAC not testable**: sendspin-rs v0.1 only has a PCM decoder. FLAC testing requires either a newer sendspin-rs or a custom decoder.
