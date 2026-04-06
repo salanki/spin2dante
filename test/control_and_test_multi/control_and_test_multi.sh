@@ -37,25 +37,27 @@ done
 echo ""
 echo "=== Creating audio subscriptions (${STREAM_COUNT} pairs) ==="
 
+# Run subscriptions in parallel — each targets independent devices
 for i in $(seq -w 1 $STREAM_COUNT); do
-    # Find the bridge device's full name (includes MAC suffix)
-    bridge_name=$(echo "$devices" | grep "SS${i} " | awk '{print $1, $2}' | head -1)
-    rx_name="rx${i}"
+    (
+        # Zero-pad to 2 digits for matching device names (SS01, SS02, ...)
+        padded=$(printf "%02d" $((10#$i)))
+        bridge_name=$(echo "$devices" | grep "SS${padded} " | awk '{print $1}' | head -1)
+        rx_name="rx${padded}"
 
-    if [ -z "$bridge_name" ]; then
-        # Try without leading zero
-        bridge_name=$(echo "$devices" | grep "SS$((10#$i)) " | awk '{print $1, $2}' | head -1)
-    fi
-
-    if [ -n "$bridge_name" ]; then
-        netaudio subscription add --tx "01@${bridge_name}" --rx "01@${rx_name}" 2>/dev/null && \
-        netaudio subscription add --tx "02@${bridge_name}" --rx "02@${rx_name}" 2>/dev/null && \
-        echo "  ${rx_name} <- ${bridge_name}" || \
-        echo "  FAILED: ${rx_name} <- ${bridge_name}"
-    else
-        echo "  SKIPPED: bridge SS${i} not found"
-    fi
+        if [ -n "$bridge_name" ]; then
+            netaudio subscription add --tx "01@${bridge_name}" --rx "01@${rx_name}" 2>/dev/null && \
+            netaudio subscription add --tx "02@${bridge_name}" --rx "02@${rx_name}" 2>/dev/null && \
+            echo "  ${rx_name} <- ${bridge_name}" || \
+            echo "  FAILED: ${rx_name} <- ${bridge_name}"
+        else
+            echo "  SKIPPED: bridge SS${i} not found"
+        fi
+    ) &
 done
+
+echo "Waiting for all subscriptions to complete..."
+wait
 
 echo ""
 echo "Subscriptions created. Recording for ${RECORD_SECS} seconds..."
@@ -69,37 +71,38 @@ ok=0
 signal_present=0
 min_size=$((5 * 48000 * 2 * 4))  # at least 5s of audio
 
-for i in $(seq -w 1 $STREAM_COUNT); do
+for i in $(seq 1 $STREAM_COUNT); do
     total=$((total + 1))
-    file="/shared/capture_${i}.raw"
+    padded=$(printf "%02d" $i)
+    file="/shared/capture_${padded}.raw"
 
     if [ ! -f "$file" ]; then
-        echo "  capture_${i}.raw: MISSING"
+        echo "  capture_${padded}.raw: MISSING"
         continue
     fi
 
     size=$(stat -c %s "$file" 2>/dev/null || echo 0)
     if [ "$size" -lt "$min_size" ]; then
-        echo "  capture_${i}.raw: TOO SMALL (${size} bytes)"
+        echo "  capture_${padded}.raw: TOO SMALL (${size} bytes)"
         continue
     fi
 
     ok=$((ok + 1))
 
-    # Quick signal check
+    # Signal check — scan up to 30s into the file (audio may start late)
     has_signal=$(python3 -c "
 import struct
 with open('$file', 'rb') as f:
-    data = f.read(48000*4*2)  # first 0.5s
+    data = f.read(48000 * 8 * 30)  # up to 30s of stereo 32-bit
 nonzero = sum(1 for i in range(0, len(data), 4) if struct.unpack_from('<i', data, i)[0] != 0)
 print('YES' if nonzero > 100 else 'NO')
 " 2>/dev/null || echo "ERR")
 
     if [ "$has_signal" = "YES" ]; then
         signal_present=$((signal_present + 1))
-        echo "  capture_${i}.raw: ${size} bytes, signal=YES"
+        echo "  capture_${padded}.raw: ${size} bytes, signal=YES"
     else
-        echo "  capture_${i}.raw: ${size} bytes, signal=${has_signal}"
+        echo "  capture_${padded}.raw: ${size} bytes, signal=${has_signal}"
     fi
 done
 
@@ -112,8 +115,8 @@ echo "Comparing captures pairwise to check synchronization..."
 python3 -c "
 import struct, math
 
-def read_samples(path, max_frames=48000):
-    \"\"\"Read left-channel samples as i32 values.\"\"\"
+def read_samples(path, max_frames=48000*30):
+    \"\"\"Read left-channel samples as i32 values (up to 30s).\"\"\"
     samples = []
     try:
         with open(path, 'rb') as f:

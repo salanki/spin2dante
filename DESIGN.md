@@ -57,42 +57,64 @@ The bridge does NOT obtain a PTP clock directly. Instead, it uses the `PositionR
 
 The `get_realtime_clock_receiver()` API returns a `RealTimeBoxReceiver` designed for real-time threads. On a single-threaded tokio runtime, the background task that feeds it may not deliver overlays reliably to user code. The "start at zero" model avoids this issue entirely and still produces correct audio output.
 
+### Device Lifetime
+
+The DANTE device (DeviceServer + TX) is started **once at process startup** and stays alive for the entire process lifetime. This matches standard DANTE behavior where devices are persistent network entities. Subscriptions configured in Dante Controller persist across playback sessions.
+
 ### Startup sequence
 
-1. `DeviceServer::start()` — creates DANTE device, waits for PTP clock
-2. `transmit_from_external_buffer()` — registers ring buffers
-3. `start_tx.send(0)` — starts FlowsTransmitter immediately (no blocking)
-4. Bridge enters Prebuffering state, writes audio at positions 0, 1, 2...
-5. After `prebuffer_target` samples written, transitions to Running
+1. `DeviceServer::start()` — creates DANTE device, blocks until PTP clock available
+2. Ring buffer created and zeroed (silence)
+3. `transmit_from_external_buffer()` — registers ring buffers with inferno
+4. `start_tx.send(0)` — starts FlowsTransmitter (idle, transmitting silence)
+5. Bridge enters **Idle** state — device visible on network, ring silent
+6. Connect to Sendspin server (retry loop)
+7. On StreamStart → enter **WaitingForSubscriber**
 
-The FlowsTransmitter may report "clock unavailable" until it receives its first PTP overlay from the background clock thread. This is non-blocking — the bridge continues writing audio regardless. Once the clock becomes available, inferno starts reading and transmitting.
+The FlowsTransmitter may report "clock unavailable" until it receives its first PTP overlay. This is non-blocking — the device is still registered and visible on the network.
+
+### Why WaitingForSubscriber exists
+
+When a stream starts, the bridge writes audio to the ring buffer. But inferno reads at `(ptp_now - latency) % RING_BUFFER_SIZE` — a position determined by the PTP clock, not by our write position. If no subscriber has connected yet, or the PTP clock isn't available, the read and write positions are in different domains.
+
+WaitingForSubscriber monitors `read_pos` from `PositionReportDestination`. When `read_pos` starts advancing (subscriber connected + clock working), the bridge calls `snap_to_live()`:
+1. Zero-fill `[read_pos, read_pos + prebuffer_target)` — silence during prebuffer
+2. Set `write_pos = read_pos + prebuffer_target` — fresh audio lands right after
+3. Enter Prebuffering
+
+If `read_pos` doesn't advance within 5 seconds (clock may still be warming up), the bridge falls back to Prebuffering without snap-to-live alignment. This is a pragmatic degradation for environments where clock overlay propagation is slow.
 
 ## State Machine
 
 ```
-        StreamStart
-  Idle ───────────→ Prebuffering ──→ Running
-                         ↑               │
-                         │  StreamStart   │
-                         │  StreamClear   │
-                         └──── Rebuffering←┘
-                                   │
-                         StreamEnd │
-                              Idle ←┘
+process start → Idle (device + TX alive, ring silent)
+                  │
+            StreamStart
+                  ▼
+        WaitingForSubscriber → Prebuffering → Running
+                  ↑                 ↑              │
+                  │                 │ StreamClear   │
+                  │                 └─Rebuffering ──┘
+                  │                       │
+                  │             StreamEnd │
+                  └────── Idle ←──────────┘
 ```
 
-- **Idle**: No stream, DANTE device may not exist
-- **Prebuffering**: Writing audio, accumulating jitter buffer
-- **Running**: Actively transmitting, metrics logged
-- **Rebuffering**: Stream cleared/restarted, stale audio discarded, refilling
+All states have the DANTE device + TX alive. The difference is what audio is in the ring:
+
+- **Idle**: Ring is explicitly zeroed (silence). No stale audio can loop.
+- **WaitingForSubscriber**: Discardable scratch audio in ring, waiting for subscriber + clock.
+- **Prebuffering**: Fresh audio accumulating after snap_to_live (or timeout fallback).
+- **Running**: Live audio with correct jitter buffer.
+- **Rebuffering**: Zero-fill + fresh audio after seek/clear.
 
 ### Stream lifecycle handling
 
-- **StreamStart (first)**: Start DANTE device, enter Prebuffering
-- **StreamStart (same format)**: Clear stale audio, enter Rebuffering (no device restart)
-- **StreamStart (different format)**: Stop device, restart with new format
-- **StreamClear**: Zero-fill from current read_pos, jump write_pos ahead, enter Rebuffering
-- **StreamEnd**: Stop transmitter, enter Idle
+- **StreamStart**: Enter WaitingForSubscriber (or snap_to_live if subscriber already active)
+- **StreamStart (same format, already Running)**: Clear stale audio, enter Rebuffering
+- **StreamClear**: Zero-fill from read_pos, jump write_pos ahead, enter Rebuffering
+- **StreamEnd**: Zero entire ring, reset stream state, enter Idle (device stays on network)
+- **Sendspin disconnect**: Same as StreamEnd — zero ring, enter Idle, reconnect
 
 ### Clear/Rebuffer behavior
 
@@ -104,6 +126,21 @@ On stream/clear, the bridge must discard stale audio that inferno is about to re
 4. Enter Rebuffering state
 
 This ensures inferno reads silence immediately (not stale pre-seek audio), then the bridge refills the jitter buffer with fresh data.
+
+### Subscriber reconnect alignment
+
+If a DANTE subscriber disconnects and reconnects (or a new subscriber joins while a stream is active), the bridge must ensure the subscriber hears current audio, not stale data left in the ring buffer from an earlier write position.
+
+The mechanism: when `read_pos` starts advancing at a new position (detected in WaitingForSubscriber or during Running state monitoring), `snap_to_live()` fires:
+
+1. Read the subscriber's current `read_pos`
+2. Zero-fill `[read_pos, read_pos + prebuffer_target)` — brief silence
+3. Set `write_pos = read_pos + prebuffer_target`
+4. Enter Prebuffering with fresh audio
+
+This anchors the bridge's write position to wherever the subscriber is reading NOW. The subscriber gets current audio with only a prebuffer-sized gap of silence (~50ms), regardless of how long the bridge was writing to the ring before the subscriber appeared.
+
+**Note:** This mechanism requires `read_pos` from `PositionReportDestination` to advance, which only happens when inferno's FlowsTransmitter has a valid PTP clock and is actively reading. In Docker test environments with the fake clock, the clock overlay may not propagate reliably to the FlowsTransmitter, so a 5-second timeout fallback enters Prebuffering without snap-to-live alignment. In production with a real PTP clock (Statime synced to DANTE hardware), snap_to_live works correctly.
 
 ## Data Path
 
@@ -148,7 +185,7 @@ The bridge **rejects** streams at StreamStart that don't match:
 
 ## Reconnection
 
-The bridge has an outer reconnect loop. If the WebSocket drops (server restart, network issue), it stops the current session, waits 2 seconds, and reconnects. The DANTE device is stopped and recreated on reconnect since the stream state resets.
+The bridge has an outer reconnect loop. If the WebSocket drops (server restart, network issue), it zeros the ring buffer, enters Idle, waits 2 seconds, and reconnects. The DANTE device stays on the network — only the stream state resets.
 
 ## Codec Support
 

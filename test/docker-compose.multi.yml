@@ -3,7 +3,7 @@
 ## All 16 bridges connect to the same Sendspin server (one group).
 ## Each bridge becomes a separate DANTE TX device.
 ## Each i2pipe captures one bridge's output.
-## The control container creates all subscriptions and validates all captures.
+## The control container creates all subscriptions (in parallel) and validates.
 
 volumes:
   shared:

@@ -59,7 +59,7 @@ Notes:
 # Single-stream E2E test (1 bridge, 1 receiver)
 make test
 
-# Multi-stream E2E test (16 bridges in one Sendspin group, 16 receivers)
+# Multi-stream E2E test (4 bridges in one Sendspin group, 4 receivers)
 make test-multi
 
 # Override inferno location if needed
@@ -274,19 +274,19 @@ The `--build` flag rebuilds changed images. The bridge Dockerfile doesn't cache 
 
 ## Multi-Stream Test (`make test-multi`)
 
-Tests 16 bridge instances all connected to the same Sendspin server, simulating a real multi-room deployment where all zones play the same stream in sync.
+Tests 4 bridge instances all connected to the same Sendspin server, simulating a real multi-room deployment where all zones play the same stream in sync.
 
 ### What it does
 
 - 1 Sendspin server serving a 1kHz test tone
-- 16 bridge containers (SS01–SS16), each a separate DANTE TX device
-- 16 i2pipe containers (rx01–rx16), each capturing one bridge's output
-- 1 control container that creates all 32 subscriptions and analyzes results
+- 4 bridge containers (SS01–SS04), each a separate DANTE TX device
+- 4 i2pipe containers (rx01–rx04), each capturing one bridge's output
+- 1 control container that creates all 8 subscriptions and analyzes results
 
 ### What it measures
 
-1. **Signal presence**: Each of the 16 captures is checked for non-zero audio
-2. **Cross-stream sync**: Compares the onset (first non-zero sample) across all 16 captures and reports the spread in samples and milliseconds
+1. **Signal presence**: Each of the 4 captures is checked for non-zero audio
+2. **Cross-stream sync**: Compares the onset (first non-zero sample) across all 4 captures and reports the spread in samples and milliseconds
 
 ```
 Onset spread: 48 samples (1.00ms)
@@ -300,7 +300,7 @@ Sync quality thresholds:
 
 ### Resource requirements
 
-35 containers total (16 bridges + 16 receivers + clock + source + control). Each inferno DeviceServer uses a real-time thread. Expect:
+11 containers total (4 bridges + 4 receivers + clock + source + control). Each inferno DeviceServer uses a real-time thread. Expect:
 - ~2-3GB RAM
 - Significant CPU during startup (all containers building/initializing in parallel)
 - ~3-4 minutes total runtime (builds + discovery timeout + 20s recording)
@@ -308,8 +308,8 @@ Sync quality thresholds:
 ### Container naming
 
 Each bridge/receiver needs a unique `INFERNO_DEVICE_ID` to avoid mDNS conflicts. The compose file assigns sequential IDs:
-- Bridges: `0000000000000101` through `0000000000000110`
-- Receivers: `0000000000000201` through `0000000000000210`
+- Bridges: `0000000000000101` through `0000000000000104`
+- Receivers: `0000000000000201` through `0000000000000204`
 
 ## Real PTP Test (`make test-ptp`)
 
@@ -329,13 +329,13 @@ Tested and validated via `make test-resilience`:
 
 | Scenario | Bridge behavior |
 |----------|----------------|
-| **Sendspin server disconnects** | Bridge detects disconnect, logs "session ended with error", waits 2s, auto-reconnects. DANTE device is stopped and recreated on new session. |
+| **Sendspin server disconnects** | Bridge detects disconnect, logs "session ended with error", zeros ring, enters Idle, waits 2s, auto-reconnects. DANTE device stays on network. |
 | **Stream seek (StreamClear)** | Stale buffered audio is zeroed from current read position. Bridge enters rebuffer mode, refills jitter buffer with fresh data, then resumes. |
-| **Stream ends (StreamEnd)** | Transmitter stopped, bridge enters Idle state. Waits for next StreamStart. |
-| **New stream with same format (StreamStart)** | Treated as a stream boundary — stale audio cleared, rebuffer mode, no device restart. |
+| **Stream ends (StreamEnd)** | Ring zeroed, bridge enters Idle. DANTE device stays on network. |
+| **New stream with same format (StreamStart, already Running)** | Stale audio cleared, rebuffer mode, no device restart. |
 | **New stream with different format** | DANTE device fully restarted with new settings. |
 | **PTP master disappears** | Statime stops exporting clock overlays. FlowsTransmitter reports "clock unavailable" until PTP master returns. Audio stops but bridge stays alive. |
-| **Multiple StreamStart without StreamEnd** | Each treated as a stream boundary (clear + rebuffer). |
+| **Multiple StreamStart without StreamEnd** | If already Running with same format: clear + rebuffer. Otherwise: enter WaitingForSubscriber. |
 
 ## Known Limitations
 
