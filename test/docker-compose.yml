@@ -1,0 +1,105 @@
+volumes:
+  shared:
+
+networks:
+  audio_net:
+    driver: bridge
+
+services:
+  # Clear shared volume
+  init:
+    image: alpine:3
+    command: sh -c "rm -rf /shared/* && echo 'shared volume cleared'"
+    volumes:
+      - shared:/shared
+
+  # Fake usrvclock server for PTP clock synchronization
+  clock_source:
+    build:
+      context: ../../inferno/test/dockerized_trx/fake_usrvclock_server
+    environment:
+      - USRVCLOCK_SOCKET=/shared/usrvclock
+    volumes:
+      - shared:/shared
+    networks:
+      - audio_net
+    depends_on:
+      init:
+        condition: service_completed_successfully
+
+  # Sendspin test source — serves known test audio
+  sendspin_source:
+    build:
+      context: ./sendspin_source
+    networks:
+      - audio_net
+    depends_on:
+      init:
+        condition: service_completed_successfully
+
+  # The bridge under test
+  bridge:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["mkdir -p /shared/tmp_bridge && exec sendspin_bridge --url ws://sendspin_source:8927/sendspin --name SSBridge --buffer-ms 50"]
+    environment:
+      INFERNO_CLOCK_PATH: /shared/usrvclock
+      INFERNO_TX_CHANNELS: "2"
+      INFERNO_RX_CHANNELS: "0"
+      INFERNO_SAMPLE_RATE: "48000"
+      TMPDIR: /shared/tmp_bridge
+      RUST_LOG: "info"
+    volumes:
+      - shared:/shared
+    networks:
+      - audio_net
+    ulimits:
+      memlock: 200000000
+    shm_size: 200m
+    depends_on:
+      clock_source:
+        condition: service_started
+      sendspin_source:
+        condition: service_started
+
+  # inferno2pipe — DANTE receiver, captures audio to file
+  # Pre-build with: docker build -f Dockerfile.alpine-i2pipe -t inferno_aoip:alpine-i2pipe ../../inferno/
+  i2pipe:
+    image: inferno_aoip:alpine-i2pipe
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["mkdir -p /shared/tmp_i2pipe && sleep 5 && inferno2pipe -c 2 -o /shared/capture.raw"]
+    environment:
+      INFERNO_CLOCK_PATH: /shared/usrvclock
+      INFERNO_NAME: i2pipe
+      INFERNO_SAMPLE_RATE: "48000"
+      INFERNO_RX_CHANNELS: "2"
+      INFERNO_TX_CHANNELS: "0"
+      TMPDIR: /shared/tmp_i2pipe
+    volumes:
+      - shared:/shared
+    networks:
+      - audio_net
+    ulimits:
+      memlock: 200000000
+    shm_size: 200m
+    depends_on:
+      clock_source:
+        condition: service_started
+      bridge:
+        condition: service_started
+
+  # Test orchestrator — creates subscriptions and validates output
+  control_and_test:
+    build:
+      context: ./control_and_test
+    volumes:
+      - shared:/shared
+    networks:
+      - audio_net
+    depends_on:
+      bridge:
+        condition: service_started
+      i2pipe:
+        condition: service_started
