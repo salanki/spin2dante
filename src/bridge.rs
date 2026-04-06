@@ -323,13 +323,15 @@ impl SendspinBridge {
                 }
             }
             Message::StreamEnd(_) => {
-                info!("stream ended");
+                info!("stream ended, stopping transmitter");
                 self.stop_transmitter().await;
+                info!("state transition: {} -> Idle",
+                    if self.state == BridgeState::Idle { "Idle" } else { "Running/Other" });
             }
             Message::StreamClear(_) => {
                 // stream/clear = seek or config update. Keep device alive,
                 // discard stale buffered audio, wait for fresh data.
-                info!("stream cleared");
+                info!("stream cleared, discarding buffered audio and entering rebuffer mode");
                 self.clear_and_rebuffer();
             }
             _ => {
@@ -343,8 +345,10 @@ impl SendspinBridge {
         let params = ring_buffer.as_external_params();
 
         let short_name = self.device_name.chars().take(14).collect::<String>();
+        let mut config = std::collections::BTreeMap::new();
+        config.insert("NAME".to_string(), self.device_name.clone());
         let mut settings =
-            Settings::new(&self.device_name, &short_name, None, &Default::default());
+            Settings::new(&self.device_name, &short_name, None, &config);
         settings.make_tx_channels(CHANNELS);
         settings.make_rx_channels(0);
 

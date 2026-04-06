@@ -1,0 +1,80 @@
+## Resilience test: exercises stream stop/start, seek (clear), and server disconnect/reconnect.
+## Uses a custom test server that runs scripted scenarios instead of sendspin-cli.
+
+volumes:
+  shared:
+
+networks:
+  audio_net:
+    driver: bridge
+
+services:
+  init:
+    image: alpine:3
+    command: sh -c "rm -rf /shared/* && echo 'shared volume cleared'"
+    volumes:
+      - shared:/shared
+
+  clock_source:
+    build:
+      context: ../../inferno/test/dockerized_trx/fake_usrvclock_server
+    environment:
+      - USRVCLOCK_SOCKET=/shared/usrvclock
+    volumes:
+      - shared:/shared
+    networks:
+      - audio_net
+    depends_on:
+      init:
+        condition: service_completed_successfully
+
+  # Custom test server that runs scripted resilience scenarios
+  test_server:
+    build:
+      context: ./resilience
+      dockerfile: Dockerfile.server
+    networks:
+      - audio_net
+    depends_on:
+      init:
+        condition: service_completed_successfully
+
+  # The bridge under test — logs tee'd to shared volume for validation
+  bridge:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["mkdir -p /shared/tmp_bridge && spin2dante --url ws://test_server:8927/sendspin --name SSResilience --buffer-ms 50 2>&1 | tee /shared/bridge.log"]
+    environment:
+      INFERNO_CLOCK_PATH: /shared/usrvclock
+      INFERNO_TX_CHANNELS: "2"
+      INFERNO_RX_CHANNELS: "0"
+      INFERNO_SAMPLE_RATE: "48000"
+      TMPDIR: /shared/tmp_bridge
+      RUST_LOG: "info"
+    volumes:
+      - shared:/shared
+    networks:
+      - audio_net
+    ulimits:
+      memlock: 200000000
+    shm_size: 200m
+    depends_on:
+      clock_source:
+        condition: service_started
+      test_server:
+        condition: service_started
+
+  # Validator — waits for scenarios to finish, then checks bridge logs
+  validator:
+    build:
+      context: ./resilience
+      dockerfile: Dockerfile.validator
+    volumes:
+      - shared:/shared
+    networks:
+      - audio_net
+    depends_on:
+      bridge:
+        condition: service_started
