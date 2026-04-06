@@ -175,6 +175,10 @@ The bridge currently advertises and accepts PCM `16-bit` and `24-bit` Sendspin s
 
 This is an implementation choice, not a fundamental architectural limit. Supporting wider PCM formats in the future would require explicit protocol, decode, and TX-path validation, but the bridge design itself is not inherently restricted to only `16-bit` and `24-bit` PCM.
 
+## Player Capabilities
+
+The bridge advertises itself as a Sendspin player with no volume or mute support (`supported_commands: []`). It is a transparent passthrough — audio is delivered to DANTE exactly as the server sends it, with no gain processing. Volume control is expected to happen upstream (in Music Assistant) or downstream (on the DANTE receiver/amplifier).
+
 ## Multi-Stream Deployment
 
 One bridge process per Sendspin stream. Each bridge needs unique `INFERNO_PROCESS_ID` and `INFERNO_ALT_PORT` (or unique `INFERNO_DEVICE_ID` in Docker bridge networks).

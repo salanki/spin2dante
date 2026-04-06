@@ -63,7 +63,7 @@ Notes:
 # Single-stream E2E test (1 bridge, 1 receiver)
 make test
 
-# Multi-stream E2E test (16 bridges in one Sendspin group, 16 receivers)
+# Multi-stream E2E test (4 bridges in one Sendspin group, 4 receivers)
 make test-multi
 
 # Override inferno location if needed
@@ -80,7 +80,7 @@ Seven Docker containers on a shared bridge network (single-stream test):
 ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  ┌───────────────┐
 │ ptp-master   │  │ ptp-follower │  │ sendspin_source   │  │ control_and_  │
 │ (PTPv2 ref)  │→ │ usrvclock     │  │ deterministic     │  │ test          │
-│              │  │ exporter      │  │ 24-bit reference  │  │ (netaudio +   │
+│              │  │ exporter      │  │ 16-bit reference  │  │ (netaudio +   │
 └──────────────┘  └──────┬───────┘  │ WAV via WS        │  │ overlap check)│
                          │          └────────┬─────────┘  └───────┬───────┘
                          │                   │ WebSocket           │ netaudio
@@ -104,7 +104,7 @@ Seven Docker containers on a shared bridge network (single-stream test):
 | `init` | `alpine:3` | Clears the shared volume before each run |
 | `ptp-master` | Built from `statime/` | PTPv2 clock master (reference clock) |
 | `ptp-follower` | Built from `statime/` | PTPv2 clock follower — syncs to master, exports usrvclock |
-| `sendspin_source` | `python:3.13-alpine` + `pip install sendspin` | Generates a deterministic 30s 24-bit stereo reference WAV and matching capture-domain raw reference, serves the WAV via `sendspin serve` on port 8927 |
+| `sendspin_source` | `python:3.13-alpine` + `pip install sendspin` | Generates a deterministic 30s 16-bit stereo reference WAV and matching capture-domain raw reference, serves the WAV via `sendspin serve` on port 8927 |
 | `bridge` | Built from this repo's `Dockerfile` | The bridge under test. Connects to sendspin_source, transmits as DANTE device "SSBridge" |
 | `i2pipe` | `inferno_aoip:alpine-i2pipe` (pre-built) | DANTE receiver. Captures audio to `/shared/capture.raw` |
 | `control_and_test` | `python:3.13-alpine` + `netaudio` | Orchestrator: discovers DANTE devices, creates subscriptions, validates captured audio |
@@ -277,42 +277,42 @@ The `--build` flag rebuilds changed images. The bridge Dockerfile doesn't cache 
 
 ## Multi-Stream Test (`make test-multi`)
 
-Tests 16 bridge instances all connected to the same Sendspin server, simulating a real multi-room deployment where all zones play the same stream in sync.
+Tests 4 bridge instances all connected to the same Sendspin server, simulating a real multi-room deployment where all zones play the same stream in sync.
 
 ### What it does
 
 - 1 Sendspin server serving the deterministic reference signal
-- 16 bridge containers (SS01–SS16), each a separate DANTE TX device
-- 16 i2pipe containers (rx01–rx16), each capturing one bridge's output
-- 1 control container that creates all 32 subscriptions and analyzes results
+- 4 bridge containers (SS01–SS04), each a separate DANTE TX device
+- 4 i2pipe containers (rx01–rx04), each capturing one bridge's output
+- 1 control container that creates all 8 subscriptions and analyzes results
 
 ### What it measures
 
 1. **Bit-perfect overlap**: Each capture is aligned against the shared reference signal and must contain one continuous exact match region
-2. **Cross-stream sync**: Compares the source-alignment offsets across all captures and requires the spread to stay below 1ms (< 48 samples at 48kHz)
+2. **Anchor sync (sync_key)**: Each bridge writes a `sync_key` file at anchor time. The sync_key is `anchor_ring_pos - anchor_server_us * SAMPLE_RATE / 1M` — a value that should be identical across all bridges if their PTP and ClockSync are consistent. The test reads these files and checks that the spread is < 48 samples (< 1ms). This is the **primary** sync metric.
+3. **Capture end-alignment** (informational): Compares alignment offsets across captures. This metric includes subscription timing differences and is **not** used for pass/fail.
 
 ```
-Source-offset spread: 24 frames (0.50ms)
-SYNC: GOOD (spread < 1ms)
+Sync-key spread: 3 samples (0.06ms)
+ANCHOR SYNC: GOOD (< 1ms)
 ```
 
-Sync quality thresholds:
-- **PASS**: < 1ms spread (< 48 samples)
-- **FAIL**: >= 1ms spread or insufficient aligned captures
-- The script still prints `GOOD` / `FAIR` / `POOR` for context, but only `GOOD` passes the test
+Sync pass/fail:
+- **PASS**: sync_key spread < 48 samples (< 1ms)
+- **FAIL**: spread >= 48 samples or insufficient data
 
 ### Resource requirements
 
-37 containers total (16 bridges + 16 receivers + init + ptp-master + ptp-follower + source + control). Each inferno DeviceServer uses a real-time thread. Expect:
-- ~2-3GB RAM
+13 containers total (4 bridges + 4 receivers + init + ptp-master + ptp-follower + source + control). Each inferno DeviceServer uses a real-time thread. Expect:
+- ~1-2GB RAM
 - Significant CPU during startup (all containers building/initializing in parallel)
 - ~3-4 minutes total runtime (builds + discovery timeout + 20s recording)
 
 ### Container naming
 
 The test harness uses explicit `INFERNO_DEVICE_ID` values (not `PROCESS_ID`/`ALT_PORT`) because all containers are on a Docker bridge network with unique IPs, unlike production where all bridges share the host IP. This is a harness-specific shortcut.
-- Bridge IDs: `0000000000000101` through `0000000000000110`
-- Receiver IDs: `0000000000000201` through `0000000000000210`
+- Bridge IDs: `0000000000000101` through `0000000000000104`
+- Receiver IDs: `0000000000000201` through `0000000000000204`
 
 ## PTP Clock Architecture (all tests)
 
