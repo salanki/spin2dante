@@ -1,16 +1,19 @@
-## spin2dante production deployment template
+## spin2dante production deployment
+##
+## Prerequisites:
+##   - DANTE devices on the network acting as PTP master (clock leader).
+##     Statime runs as PTPv1 follower — it does NOT act as clock master.
+##     Without an existing DANTE PTP leader, clocking will not work.
+##   - Set PTP_INTERFACE to your network interface
 ##
 ## Usage:
-##   1. Edit the bridge services below (name, URL, device ID)
-##   2. Adjust the Statime config in statime/statime-docker.toml (interface)
+##   1. export PTP_INTERFACE=enp1s0  (your DANTE-facing NIC)
+##   2. Uncomment and edit bridge services below
 ##   3. docker compose up -d
 ##
-## All services use host networking for:
-##   - Statime: accurate PTP timestamps from the real NIC
-##   - Bridges: DANTE multicast traffic on the LAN
-##
-## The usrvclock socket is shared via a host path mount so Statime's
-## clock overlay reaches all bridge containers.
+## All services use host networking:
+##   - Statime: PTP sync directly on the LAN
+##   - Bridges: DANTE multicast + mDNS directly on the LAN
 
 x-bridge: &bridge
   image: spin2dante
@@ -18,17 +21,25 @@ x-bridge: &bridge
     context: .
     dockerfile: Dockerfile
   network_mode: host
+  ulimits:
+    memlock: 200000000
+    rtprio: 99          # allow real-time thread scheduling
   volumes:
     - ${SPIN2DANTE_SHARED:-/tmp/spin2dante}:/shared
+    - inferno-state:/root/.local/state/inferno_aoip  # persistent device state
   environment: &bridge-env
     INFERNO_CLOCK_PATH: /shared/usrvclock
     INFERNO_SAMPLE_RATE: "48000"
-    INFERNO_TX_CHANNELS: "2"
-    INFERNO_RX_CHANNELS: "0"
+    # TMPDIR must be on the shared path so Statime can reach usrvclock
+    # client sockets. Each bridge MUST have its own unique subdirectory
+    # to avoid socket name collisions (PIDs overlap across containers).
   restart: unless-stopped
   depends_on:
     statime:
       condition: service_started
+
+volumes:
+  inferno-state:
 
 services:
   statime:
@@ -39,23 +50,51 @@ services:
       - SYS_TIME
     volumes:
       - ${SPIN2DANTE_SHARED:-/tmp/spin2dante}:/shared
+    environment:
+      PTP_INTERFACE: ${PTP_INTERFACE:-eth0}
     restart: unless-stopped
+    ## Hardware timestamping (optional, more accurate):
+    ##   1. Verify your NIC supports it: ethtool -T <interface>
+    ##      Look for "hardware-transmit" and "hardware-receive" in Capabilities
+    ##   2. Find the PTP device: ethtool -T <interface> | grep "PTP Hardware Clock"
+    ##      This tells you which /dev/ptpN corresponds to your NIC
+    ##   3. Uncomment the devices section below
+    ##   4. In statime/statime-docker.toml, change:
+    ##        hardware-clock = "none"  →  hardware-clock = "auto"
+    # devices:
+    #   - /dev/ptpN:/dev/ptpN  # replace N with the index reported by ethtool
 
   ## --- Add one service per Sendspin source / DANTE zone ---
-  ## Each bridge needs a unique INFERNO_DEVICE_ID and TMPDIR.
+  ##
+  ## Each bridge needs:
+  ##   - Unique TMPDIR subdirectory (e.g., /shared/tmp_kitchen)
+  ##   - Unique PROCESS_ID (0-65535)
+  ##   - Unique ALT_PORT (base port, spaced 10 apart)
+  ##   - DEVICE_ID is auto-derived from IP + PROCESS_ID
 
   # bridge-kitchen:
   #   <<: *bridge
-  #   command: ["--url", "ws://music-assistant:8927/sendspin", "--name", "Kitchen"]
+  #   command: ["--url", "ws://music-assistant.local:8927/sendspin", "--name", "Kitchen"]
   #   environment:
   #     <<: *bridge-env
-  #     INFERNO_DEVICE_ID: "0000000000000001"
   #     TMPDIR: /shared/tmp_kitchen
+  #     INFERNO_PROCESS_ID: "1"
+  #     INFERNO_ALT_PORT: "14000"
 
   # bridge-bedroom:
   #   <<: *bridge
-  #   command: ["--url", "ws://music-assistant:8927/sendspin", "--name", "Bedroom"]
+  #   command: ["--url", "ws://music-assistant.local:8927/sendspin", "--name", "Bedroom"]
   #   environment:
   #     <<: *bridge-env
-  #     INFERNO_DEVICE_ID: "0000000000000002"
   #     TMPDIR: /shared/tmp_bedroom
+  #     INFERNO_PROCESS_ID: "2"
+  #     INFERNO_ALT_PORT: "14010"
+
+  # bridge-living-room:
+  #   <<: *bridge
+  #   command: ["--url", "ws://music-assistant.local:8927/sendspin", "--name", "Living Room"]
+  #   environment:
+  #     <<: *bridge-env
+  #     TMPDIR: /shared/tmp_living_room
+  #     INFERNO_PROCESS_ID: "3"
+  #     INFERNO_ALT_PORT: "14020"

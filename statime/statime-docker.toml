@@ -1,29 +1,27 @@
-# Statime PTPv2 configuration for real hardware testing.
+# Statime PTP configuration for spin2dante production deployment.
 #
-# Runs as PTP follower using software timestamps on CLOCK_MONOTONIC_RAW.
-# Exports clock to inferno devices via the usrvclock protocol socket.
+# Runs as PTPv1 FOLLOWER using software timestamps.
+# Requires an existing DANTE device on the network acting as PTP master.
+# Exports synchronized clock to spin2dante bridges via usrvclock.
 #
-# Requirements:
-# - Real DANTE devices on the network (PTP master source)
-# - Host with a globally-administered MAC address (not a VM/Docker veth)
-# - CAP_SYS_TIME capability
+# The network interface is patched by entrypoint.sh from $PTP_INTERFACE.
 
 loglevel = "info"
 
 sdo-id = 0
 domain = 0
-priority1 = 251
+priority1 = 251   # high = prefer to be PTP follower
 priority2 = 128
 
 virtual-system-clock = true
 virtual-system-clock-base = "monotonic_raw"
 
-# Export clock via usrvclock protocol — inferno reads from this socket
+# Export clock via usrvclock protocol
 usrvclock-export = true
 usrvclock-path = "/shared/usrvclock"
 
 [[port]]
-interface = "eth0"
+interface = "eth0"              # patched by entrypoint.sh from $PTP_INTERFACE
 network-mode = "ipv4"
-hardware-clock = "auto"
-protocol-version = "PTPv2"
+hardware-clock = "none"         # software timestamps only
+protocol-version = "PTPv1"      # Dante native PTP

@@ -11,7 +11,7 @@ Sendspin Server (Music Assistant)
         │ WebSocket (PCM audio chunks)
         ▼
 ┌─────────────────────┐
-│   sendspin_bridge    │  ← this crate (separate repo)
+│    spin2dante        │  ← this crate
 │                      │
 │  1. Connect as player│
 │  2. Receive audio    │
@@ -161,7 +161,7 @@ The bridge has an outer reconnect loop. If the WebSocket drops (server restart, 
 
 ## Multi-Stream Deployment
 
-One bridge process per Sendspin stream. For 32 streams: 32 containers, each with unique `--name` and `INFERNO_DEVICE_ID`.
+One bridge process per Sendspin stream. For 32 streams: 32 containers, each with unique `--name`, `INFERNO_PROCESS_ID`, and `INFERNO_ALT_PORT`. Device ID is auto-derived from host IP + process ID.
 
 ## Configuration
 
@@ -171,8 +171,88 @@ One bridge process per Sendspin stream. For 32 streams: 32 containers, each with
 - `--buffer-ms`: Jitter buffer size in ms (default: 50)
 
 ### Environment Variables (passed through to inferno_aoip)
-- `INFERNO_BIND_IP`, `INFERNO_DEVICE_ID`, `INFERNO_SAMPLE_RATE`
-- `INFERNO_CLOCK_PATH`, `INFERNO_TX_LATENCY_NS`
+- `INFERNO_CLOCK_PATH`, `INFERNO_SAMPLE_RATE`, `INFERNO_BIND_IP`
+- `INFERNO_PROCESS_ID`, `INFERNO_ALT_PORT` (required for multiple bridges on same host)
+- `INFERNO_TX_LATENCY_NS`
+
+## Lessons Learned
+
+Hard-won knowledge from development and testing. Read this before modifying the clock or buffer logic.
+
+### The PTP clock chain
+
+```
+DANTE devices ←PTP→ Statime daemon
+                        │
+                        │ usrvclock (Unix datagram socket)
+                        ▼
+                  inferno AsyncClient (tokio task)
+                        │
+                        │ watch::Sender<Option<ClockOverlay>>
+                        ▼
+                  watch::Receiver (per subscriber)
+                        │
+                        │ RealTimeBoxReceiver (lock-free channel)
+                        ▼
+                  FlowsTransmitter (real-time thread, priority 81)
+```
+
+Statime syncs with PTP masters on the network and exports a `ClockOverlay` (shift + frequency offset) via the usrvclock protocol. Inferno's `AsyncClient` receives this and publishes it through a `watch` channel. The `FlowsTransmitter` reads it via a `RealTimeBoxReceiver` designed for RT threads.
+
+### Why "start at zero" instead of PTP-anchored start_time
+
+The original plan was to obtain the PTP media clock time and send it as `start_time` to anchor ring buffer positions to PTP time. This failed because:
+
+1. **`get_realtime_clock_receiver()` doesn't reliably deliver overlays on single-threaded tokio.** The method creates a `RealTimeBoxReceiver` fed by a background tokio task. On a `current_thread` runtime, this task only runs when the main code yields. Polling in a loop with `yield_now()` + `sleep()` should work but the initial overlay was frequently `None`.
+
+2. **Chicken-and-egg with `current_timestamp`.** The `FlowsTransmitter` only writes to `current_timestamp` after receiving `start_time`, but we wanted to use `current_timestamp` to compute `start_time`.
+
+The "start at zero" model avoids both problems: send `start_time=0` immediately, let the transmitter start, and write at monotonically increasing positions. Since `ExternalBuffer::unconditional_read()` returns `true`, inferno reads any ring buffer position without checking write status — our writes just need to stay ahead of reads.
+
+### Why Statime can't be a standalone PTP master in Docker
+
+Statime as a PTP master with no followers has nothing to synchronize against. Its overlay export callback only fires on clock adjustments, which don't happen for a masterless PTP node. Result: the usrvclock socket is created but no overlays are ever sent, so inferno's FlowsTransmitter permanently reports "clock unavailable."
+
+The fake_usrvclock_server (used in `make test`) works because it sends periodic overlays unconditionally (every 1 second via `select()` timeout), regardless of PTP state.
+
+For production, you need real DANTE hardware on the network acting as PTP master.
+
+### Why VMs and Docker virtual NICs break Statime identity
+
+Statime derives its PTP clock identity from the NIC's MAC address, filtering out locally-administered MACs (bit 1 of first octet set). Docker's virtual NICs (`02:xx:xx`) and many VM hypervisors generate locally-administered MACs, causing `get_clock_id()` to find no valid MAC and panic.
+
+Statime has an `identity` config key for manual override, but as of the inferno-dev branch, the code uses `unwrap_or` (eager evaluation) instead of `unwrap_or_else` (lazy), so `get_clock_id()` panics even when `identity` is set. This is an upstream bug.
+
+### Why TMPDIR must be on a shared volume
+
+The usrvclock protocol uses Unix datagram sockets. The client (bridge) creates a socket at `$TMPDIR/usrvclock-client.{PID}.{N}`. The server (Statime) discovers this path via `recvfrom()` and sends overlays back to it via `sendto()`.
+
+Docker containers have isolated filesystems even with host networking (`network_mode: host` only shares the network namespace, not the mount namespace). If TMPDIR is container-local `/tmp`, Statime cannot reach the bridge's client socket. The shared volume makes these paths visible across containers.
+
+Each bridge needs a unique TMPDIR subdirectory because container main processes are typically PID 1, which would cause socket name collisions.
+
+### DANTE device naming
+
+Inferno uses two hostnames:
+
+- **`friendly_hostname`**: What shows in Dante Controller. Comes from the `NAME` config key (our `--name` arg). If not set, defaults to `"{app_name} {hex_ip}"` (e.g., "SSBridge ac150004").
+- **`factory_hostname`**: Used for mDNS: `"{short_name}-{hex_device_id}"`.
+
+The device ID is auto-derived: `0000<IP_bytes><PROCESS_ID_bytes>`. With host networking, all bridges share the same IP, so `PROCESS_ID` is what makes each device unique.
+
+### Sendspin protocol reality
+
+- **sendspin-rs v0.1** only has a PCM decoder ("Phase 1: PCM only"). FLAC is planned but not implemented.
+- `AudioChunk` delivers **raw bytes** (`data: Arc<[u8]>`), not decoded samples. For PCM, we parse the bytes directly. For FLAC, we'd need our own decoder.
+- The Sendspin protocol spec mentions a `codec_header` field in StreamStart for codecs like FLAC, but the framing of FLAC data within audio chunks is not well-specified.
+- `sendspin serve` (the Python CLI) sends PCM when given a local WAV file. The codec is server-decided; the client cannot request a specific codec.
+- The `split()` method on `ProtocolClient` returns a tuple `(messages, audio, clock_sync, sender, guard)`, not a struct with named fields.
+
+### ExternalBuffer unconditional_read()
+
+This is critical to understanding the bridge's clock model. When `unconditional_read()` returns `true` (which it does for `ExternalBuffer`), inferno's `RBOutput::read_at()` reads from any ring buffer position without checking `readable_pos` or `writing_pos`. It trusts that the external writer (our bridge) has placed valid data there.
+
+This means inferno reads at `(ptp_time - start_time - latency) % RING_BUFFER_SIZE` regardless of what we've written. Our job is simply to keep writing ahead of the read position.
 
 ## Future Work
 

@@ -1,0 +1,13 @@
+configuration:
+  clock_path:
+    name: Clock socket path
+    description: Path to the usrvclock socket provided by the PTP daemon.
+  wait_for_clock_seconds:
+    name: Clock wait timeout
+    description: How long to wait for the clock socket before startup fails.
+  log_level:
+    name: Log level
+    description: Verbosity of add-on logs.
+  bridges:
+    name: Bridges
+    description: List of Sendspin-to-DANTE bridge definitions.
