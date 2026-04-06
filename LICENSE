@@ -1,0 +1,9 @@
+This project is dual licensed under the GPLv3-or-later and AGPLv3-or-later.
+You may choose which license to use.
+
+See LICENSE.GPL and LICENSE.AGPL for the full license texts.
+
+This dual license matches inferno_aoip (https://gitlab.com/lumifaza/inferno),
+which spin2dante depends on as a library. The sendspin crate
+(https://crates.io/crates/sendspin) is licensed under MIT OR Apache-2.0,
+which is compatible with both GPL and AGPL.
