@@ -2,7 +2,7 @@ INFERNO_DIR ?= ../inferno
 MUSIC_ASSISTANT_COMPOSE ?= test/music_assistant/docker-compose.yml
 MUSIC_ASSISTANT_DOCKER_CONFIG ?= /tmp/music-assistant-docker-config
 
-.PHONY: build test test-multi test-resilience test-ptp ma-up ma-down ma-logs clean
+.PHONY: build test test-multi test-resilience test-ptp test-ma-interactive ma-up ma-down ma-logs clean
 
 ## Build the bridge Docker image
 build:
@@ -44,6 +44,15 @@ test-ptp: build inferno2pipe
 	result=$$?; \
 	docker compose -f docker-compose.ptp.yml down --remove-orphans; \
 	exit $$result
+
+## Interactive Music Assistant test (2 bridges, full DANTE path, runs until ctrl-c)
+## Set MA_HOST if Music Assistant is not on the default Docker gateway
+MA_HOST ?= $(shell docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || echo 172.17.0.1)
+test-ma-interactive: build inferno2pipe
+	mkdir -p output
+	rm -f output/bridge1.raw output/bridge2.raw
+	MA_HOST=$(MA_HOST) cd test && docker compose -f docker-compose.ma-interactive.yml up --build; \
+	docker compose -f docker-compose.ma-interactive.yml down --remove-orphans
 
 ## Start the Music Assistant test server with a clean GHCR Docker config
 ma-up:
