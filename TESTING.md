@@ -5,11 +5,15 @@ All testing runs in Docker containers — no local Rust toolchain, ALSA, or PTP 
 ## Prerequisites
 
 - Docker with BuildKit (Docker Desktop or `docker buildx`)
-- The inferno repo cloned alongside this repo with submodules initialized:
+- The [inferno](https://github.com/salanki/inferno) repo cloned alongside this repo with submodules initialized:
   ```
-  projects-tmp/
-  ├── inferno/          # git submodule update --init --recursive
-  └── spin2dante/  # this repo
+  your-workspace/
+  ├── inferno/          # git clone + git submodule update --init --recursive
+  └── spin2dante/       # this repo
+  ```
+  Override the inferno location with `INFERNO_DIR` if it's elsewhere:
+  ```sh
+  make test INFERNO_DIR=/path/to/inferno
   ```
 
 ## Music Assistant Test Server

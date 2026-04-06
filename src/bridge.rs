@@ -375,25 +375,7 @@ impl SendspinBridge {
     /// Read a consistent (read_pos, Instant) pair from the TX thread's seqlock snapshot.
     /// Returns None if the snapshot hasn't been written yet or if a write is in progress.
     fn get_read_pos_snapshot(&self) -> Option<(usize, std::time::Instant)> {
-        let snap = &self.read_position_snapshot;
-        let ref_instant = (*snap.ref_instant.lock().unwrap())?;
-        for _ in 0..8 {
-            let seq1 = snap.seq.load(std::sync::atomic::Ordering::Acquire);
-            if seq1 & 1 != 0 {
-                continue; // writer active
-            }
-            let pos = snap.read_position.load(std::sync::atomic::Ordering::Relaxed);
-            let nanos = snap.monotonic_nanos.load(std::sync::atomic::Ordering::Relaxed);
-            let seq2 = snap.seq.load(std::sync::atomic::Ordering::Acquire);
-            if seq1 == seq2 {
-                if pos == usize::MAX {
-                    return None;
-                }
-                let instant = ref_instant + std::time::Duration::from_nanos(nanos);
-                return Some((pos, instant));
-            }
-        }
-        None
+        self.read_position_snapshot.try_read()
     }
 
     /// Get a consistent (read_pos, server_now_us) pair by reading the TX snapshot

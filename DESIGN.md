@@ -34,7 +34,7 @@ Sendspin Server (Music Assistant)
    DANTE Receivers
 ```
 
-The bridge uses a fork of inferno_aoip (pinned to commit `71a3455`) that adds `transmit_from_owned_buffer()` and `ReadPositionSnapshot`.
+The bridge uses a fork of inferno_aoip (pinned to commit `5b1c9d1`) that adds `transmit_from_owned_buffer()` and `ReadPositionSnapshot`.
 
 ## Two-Stage Queue
 
@@ -177,7 +177,7 @@ One bridge process per Sendspin stream. Each bridge needs unique `INFERNO_PROCES
 
 ## Inferno Fork
 
-[`github.com/salanki/inferno`](https://github.com/salanki/inferno/tree/spin2dante-owned-buffer), pinned to commit `71a3455`:
+[`github.com/salanki/inferno`](https://github.com/salanki/inferno/tree/spin2dante-owned-buffer), pinned to commit `5b1c9d1`:
 
 - `transmit_from_owned_buffer()` — creates owned ring buffers, returns `RBInput` handles
 - `ReadPositionSnapshot` — seqlock `(read_pos, monotonic_nanos, ref_instant)` for precise timing

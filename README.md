@@ -22,6 +22,12 @@ Music Assistant
 DANTE Receivers (amplifiers, receivers, etc.)
 ```
 
+### Key capabilities
+
+- **Unlimited zones** — run one bridge per zone, each appears as a separate DANTE transmitter and Music Assistant player. Tested with up to 16 simultaneous stereo pairs.
+- **Sub-millisecond cross-bridge sync** — bridges sharing the same PTP clock and Sendspin server synchronize to within 1-16 samples (0.02-0.33ms). Group playback across zones stays in tight sync without inter-bridge communication.
+- **Bit-perfect PCM transport** — the E2E test harness captures the DANTE output from each bridge, aligns it against a deterministic reference signal, and verifies sample-level exact match. The test infrastructure captures their DANTE output via `inferno2pipe`, and performs overlap comparison against a known reference. Both audio integrity (bit-perfect match) and cross-bridge sync are validated.
+
 ## Deployment Options
 
 spin2dante supports two deployment models:
@@ -261,10 +267,24 @@ Other bridges and Statime are not affected.
 
 ### Monitoring
 
-The bridge logs periodic jitter buffer metrics every 5 seconds:
+The bridge logs periodic metrics every 5 seconds. Two log lines are emitted: sync status and buffer status.
 
+**Sync status** (scheduler and queue health):
 ```
-[buffer] fill=2412 target=2400 drift=+1.2ppm min=2388 max=2436 underruns=0 overruns=0
+[sync] mode=scheduled pending=0 stale_drops=0 trims=0/0 high_water=1
+```
+
+| Metric | Meaning |
+|--------|---------|
+| `mode` | `scheduled` (anchor-based targeting active) or `sequential` (fallback) |
+| `pending` | Chunks in the pending queue waiting to enter the ring |
+| `stale_drops` | Chunks dropped because their target was behind `read_pos` |
+| `trims` | Chunks/frames trimmed (partial overlap with `read_pos`) |
+| `high_water` | Peak pending queue depth since stream start |
+
+**Buffer status** (ring buffer fill level):
+```
+[buffer] fill=2412 target=2400 drift=+1.2ppm write_pos=142880523456 read_pos=142880521056
 ```
 
 | Metric | Meaning |
@@ -272,14 +292,11 @@ The bridge logs periodic jitter buffer metrics every 5 seconds:
 | `fill` | Samples buffered (write position - read position) |
 | `target` | Configured buffer target (`--buffer-ms` converted to samples) |
 | `drift` | Estimated clock drift between Sendspin and PTP in ppm |
-| `min/max` | Fill level watermarks since last reset |
-| `underruns` | Times buffer went empty (audio gap) |
-| `overruns` | Times buffer approached full |
 
-Three distinct states are logged:
-- **Healthy**: `[buffer] fill=... target=... drift=...` — audio flowing normally
-- **No subscriber**: `[buffer] no active DANTE subscriber; audio buffered but not being consumed` — bridge has audio but no DANTE receiver is subscribed
-- **Subscriber recovered**: `[buffer] subscriber active; consumption resumed` — a receiver just subscribed
+During PTP clock warmup, the buffer line shows:
+```
+[buffer] writing at N samples (read_pos not yet available)
+```
 
 ## Troubleshooting
 
