@@ -39,7 +39,7 @@ struct Args {
     client_id: Option<String>,
 }
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 async fn main() {
     let logenv = env_logger::Env::default().default_filter_or("info");
     env_logger::init_from_env(logenv);

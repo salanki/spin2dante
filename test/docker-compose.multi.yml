@@ -25,7 +25,7 @@ x-bridge-common: &bridge-common
     memlock: 200000000
   shm_size: 200m
   depends_on:
-    clock_source:
+    ptp-follower:
       condition: service_started
     sendspin_source:
       condition: service_started
@@ -41,7 +41,7 @@ x-i2pipe-common: &i2pipe-common
     memlock: 200000000
   shm_size: 200m
   depends_on:
-    clock_source:
+    ptp-follower:
       condition: service_started
 
 x-bridge-env: &bridge-env
@@ -64,18 +64,37 @@ services:
     volumes:
       - shared:/shared
 
-  clock_source:
+  ptp-master:
     build:
-      context: ../../inferno/test/dockerized_trx/fake_usrvclock_server
+      context: ../statime
+    cap_add:
+      - SYS_TIME
     environment:
-      - USRVCLOCK_SOCKET=/shared/usrvclock
+      STATIME_CONFIG: /etc/statime-ptpv2-master.toml
     volumes:
       - shared:/shared
+      - ../statime/statime-ptpv2-master.toml:/etc/statime-ptpv2-master.toml:ro
     networks:
       - audio_net
     depends_on:
       init:
         condition: service_completed_successfully
+
+  ptp-follower:
+    build:
+      context: ../statime
+    cap_add:
+      - SYS_TIME
+    environment:
+      STATIME_CONFIG: /etc/statime-ptpv2-follower.toml
+    volumes:
+      - shared:/shared
+      - ../statime/statime-ptpv2-follower.toml:/etc/statime-ptpv2-follower.toml:ro
+    networks:
+      - audio_net
+    depends_on:
+      ptp-master:
+        condition: service_started
 
   sendspin_source:
     build:
@@ -105,22 +124,22 @@ services:
   bridge-16: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b16 && exec spin2dante --url ws://sendspin_source:8927/sendspin --name SS16 --buffer-ms 50"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b16, INFERNO_DEVICE_ID: "0000000000000110" } }
 
   # --- 16 i2pipe receivers ---
-  i2pipe-01: { <<: *i2pipe-common, command: ["mkdir -p /shared/tmp_r01 && sleep 5 && inferno2pipe -c 2 -o /shared/capture_01.raw"], environment: { <<: *i2pipe-env, TMPDIR: /shared/tmp_r01, INFERNO_NAME: rx01, INFERNO_DEVICE_ID: "0000000000000201" }, depends_on: { clock_source: { condition: service_started }, bridge-01: { condition: service_started } } }
-  i2pipe-02: { <<: *i2pipe-common, command: ["mkdir -p /shared/tmp_r02 && sleep 5 && inferno2pipe -c 2 -o /shared/capture_02.raw"], environment: { <<: *i2pipe-env, TMPDIR: /shared/tmp_r02, INFERNO_NAME: rx02, INFERNO_DEVICE_ID: "0000000000000202" }, depends_on: { clock_source: { condition: service_started }, bridge-02: { condition: service_started } } }
-  i2pipe-03: { <<: *i2pipe-common, command: ["mkdir -p /shared/tmp_r03 && sleep 5 && inferno2pipe -c 2 -o /shared/capture_03.raw"], environment: { <<: *i2pipe-env, TMPDIR: /shared/tmp_r03, INFERNO_NAME: rx03, INFERNO_DEVICE_ID: "0000000000000203" }, depends_on: { clock_source: { condition: service_started }, bridge-03: { condition: service_started } } }
-  i2pipe-04: { <<: *i2pipe-common, command: ["mkdir -p /shared/tmp_r04 && sleep 5 && inferno2pipe -c 2 -o /shared/capture_04.raw"], environment: { <<: *i2pipe-env, TMPDIR: /shared/tmp_r04, INFERNO_NAME: rx04, INFERNO_DEVICE_ID: "0000000000000204" }, depends_on: { clock_source: { condition: service_started }, bridge-04: { condition: service_started } } }
-  i2pipe-05: { <<: *i2pipe-common, command: ["mkdir -p /shared/tmp_r05 && sleep 5 && inferno2pipe -c 2 -o /shared/capture_05.raw"], environment: { <<: *i2pipe-env, TMPDIR: /shared/tmp_r05, INFERNO_NAME: rx05, INFERNO_DEVICE_ID: "0000000000000205" }, depends_on: { clock_source: { condition: service_started }, bridge-05: { condition: service_started } } }
-  i2pipe-06: { <<: *i2pipe-common, command: ["mkdir -p /shared/tmp_r06 && sleep 5 && inferno2pipe -c 2 -o /shared/capture_06.raw"], environment: { <<: *i2pipe-env, TMPDIR: /shared/tmp_r06, INFERNO_NAME: rx06, INFERNO_DEVICE_ID: "0000000000000206" }, depends_on: { clock_source: { condition: service_started }, bridge-06: { condition: service_started } } }
-  i2pipe-07: { <<: *i2pipe-common, command: ["mkdir -p /shared/tmp_r07 && sleep 5 && inferno2pipe -c 2 -o /shared/capture_07.raw"], environment: { <<: *i2pipe-env, TMPDIR: /shared/tmp_r07, INFERNO_NAME: rx07, INFERNO_DEVICE_ID: "0000000000000207" }, depends_on: { clock_source: { condition: service_started }, bridge-07: { condition: service_started } } }
-  i2pipe-08: { <<: *i2pipe-common, command: ["mkdir -p /shared/tmp_r08 && sleep 5 && inferno2pipe -c 2 -o /shared/capture_08.raw"], environment: { <<: *i2pipe-env, TMPDIR: /shared/tmp_r08, INFERNO_NAME: rx08, INFERNO_DEVICE_ID: "0000000000000208" }, depends_on: { clock_source: { condition: service_started }, bridge-08: { condition: service_started } } }
-  i2pipe-09: { <<: *i2pipe-common, command: ["mkdir -p /shared/tmp_r09 && sleep 5 && inferno2pipe -c 2 -o /shared/capture_09.raw"], environment: { <<: *i2pipe-env, TMPDIR: /shared/tmp_r09, INFERNO_NAME: rx09, INFERNO_DEVICE_ID: "0000000000000209" }, depends_on: { clock_source: { condition: service_started }, bridge-09: { condition: service_started } } }
-  i2pipe-10: { <<: *i2pipe-common, command: ["mkdir -p /shared/tmp_r10 && sleep 5 && inferno2pipe -c 2 -o /shared/capture_10.raw"], environment: { <<: *i2pipe-env, TMPDIR: /shared/tmp_r10, INFERNO_NAME: rx10, INFERNO_DEVICE_ID: "000000000000020a" }, depends_on: { clock_source: { condition: service_started }, bridge-10: { condition: service_started } } }
-  i2pipe-11: { <<: *i2pipe-common, command: ["mkdir -p /shared/tmp_r11 && sleep 5 && inferno2pipe -c 2 -o /shared/capture_11.raw"], environment: { <<: *i2pipe-env, TMPDIR: /shared/tmp_r11, INFERNO_NAME: rx11, INFERNO_DEVICE_ID: "000000000000020b" }, depends_on: { clock_source: { condition: service_started }, bridge-11: { condition: service_started } } }
-  i2pipe-12: { <<: *i2pipe-common, command: ["mkdir -p /shared/tmp_r12 && sleep 5 && inferno2pipe -c 2 -o /shared/capture_12.raw"], environment: { <<: *i2pipe-env, TMPDIR: /shared/tmp_r12, INFERNO_NAME: rx12, INFERNO_DEVICE_ID: "000000000000020c" }, depends_on: { clock_source: { condition: service_started }, bridge-12: { condition: service_started } } }
-  i2pipe-13: { <<: *i2pipe-common, command: ["mkdir -p /shared/tmp_r13 && sleep 5 && inferno2pipe -c 2 -o /shared/capture_13.raw"], environment: { <<: *i2pipe-env, TMPDIR: /shared/tmp_r13, INFERNO_NAME: rx13, INFERNO_DEVICE_ID: "000000000000020d" }, depends_on: { clock_source: { condition: service_started }, bridge-13: { condition: service_started } } }
-  i2pipe-14: { <<: *i2pipe-common, command: ["mkdir -p /shared/tmp_r14 && sleep 5 && inferno2pipe -c 2 -o /shared/capture_14.raw"], environment: { <<: *i2pipe-env, TMPDIR: /shared/tmp_r14, INFERNO_NAME: rx14, INFERNO_DEVICE_ID: "000000000000020e" }, depends_on: { clock_source: { condition: service_started }, bridge-14: { condition: service_started } } }
-  i2pipe-15: { <<: *i2pipe-common, command: ["mkdir -p /shared/tmp_r15 && sleep 5 && inferno2pipe -c 2 -o /shared/capture_15.raw"], environment: { <<: *i2pipe-env, TMPDIR: /shared/tmp_r15, INFERNO_NAME: rx15, INFERNO_DEVICE_ID: "000000000000020f" }, depends_on: { clock_source: { condition: service_started }, bridge-15: { condition: service_started } } }
-  i2pipe-16: { <<: *i2pipe-common, command: ["mkdir -p /shared/tmp_r16 && sleep 5 && inferno2pipe -c 2 -o /shared/capture_16.raw"], environment: { <<: *i2pipe-env, TMPDIR: /shared/tmp_r16, INFERNO_NAME: rx16, INFERNO_DEVICE_ID: "0000000000000210" }, depends_on: { clock_source: { condition: service_started }, bridge-16: { condition: service_started } } }
+  i2pipe-01: { <<: *i2pipe-common, command: ["mkdir -p /shared/tmp_r01 && sleep 5 && inferno2pipe -c 2 -o /shared/capture_01.raw"], environment: { <<: *i2pipe-env, TMPDIR: /shared/tmp_r01, INFERNO_NAME: rx01, INFERNO_DEVICE_ID: "0000000000000201" }, depends_on: { ptp-follower: { condition: service_started }, bridge-01: { condition: service_started } } }
+  i2pipe-02: { <<: *i2pipe-common, command: ["mkdir -p /shared/tmp_r02 && sleep 5 && inferno2pipe -c 2 -o /shared/capture_02.raw"], environment: { <<: *i2pipe-env, TMPDIR: /shared/tmp_r02, INFERNO_NAME: rx02, INFERNO_DEVICE_ID: "0000000000000202" }, depends_on: { ptp-follower: { condition: service_started }, bridge-02: { condition: service_started } } }
+  i2pipe-03: { <<: *i2pipe-common, command: ["mkdir -p /shared/tmp_r03 && sleep 5 && inferno2pipe -c 2 -o /shared/capture_03.raw"], environment: { <<: *i2pipe-env, TMPDIR: /shared/tmp_r03, INFERNO_NAME: rx03, INFERNO_DEVICE_ID: "0000000000000203" }, depends_on: { ptp-follower: { condition: service_started }, bridge-03: { condition: service_started } } }
+  i2pipe-04: { <<: *i2pipe-common, command: ["mkdir -p /shared/tmp_r04 && sleep 5 && inferno2pipe -c 2 -o /shared/capture_04.raw"], environment: { <<: *i2pipe-env, TMPDIR: /shared/tmp_r04, INFERNO_NAME: rx04, INFERNO_DEVICE_ID: "0000000000000204" }, depends_on: { ptp-follower: { condition: service_started }, bridge-04: { condition: service_started } } }
+  i2pipe-05: { <<: *i2pipe-common, command: ["mkdir -p /shared/tmp_r05 && sleep 5 && inferno2pipe -c 2 -o /shared/capture_05.raw"], environment: { <<: *i2pipe-env, TMPDIR: /shared/tmp_r05, INFERNO_NAME: rx05, INFERNO_DEVICE_ID: "0000000000000205" }, depends_on: { ptp-follower: { condition: service_started }, bridge-05: { condition: service_started } } }
+  i2pipe-06: { <<: *i2pipe-common, command: ["mkdir -p /shared/tmp_r06 && sleep 5 && inferno2pipe -c 2 -o /shared/capture_06.raw"], environment: { <<: *i2pipe-env, TMPDIR: /shared/tmp_r06, INFERNO_NAME: rx06, INFERNO_DEVICE_ID: "0000000000000206" }, depends_on: { ptp-follower: { condition: service_started }, bridge-06: { condition: service_started } } }
+  i2pipe-07: { <<: *i2pipe-common, command: ["mkdir -p /shared/tmp_r07 && sleep 5 && inferno2pipe -c 2 -o /shared/capture_07.raw"], environment: { <<: *i2pipe-env, TMPDIR: /shared/tmp_r07, INFERNO_NAME: rx07, INFERNO_DEVICE_ID: "0000000000000207" }, depends_on: { ptp-follower: { condition: service_started }, bridge-07: { condition: service_started } } }
+  i2pipe-08: { <<: *i2pipe-common, command: ["mkdir -p /shared/tmp_r08 && sleep 5 && inferno2pipe -c 2 -o /shared/capture_08.raw"], environment: { <<: *i2pipe-env, TMPDIR: /shared/tmp_r08, INFERNO_NAME: rx08, INFERNO_DEVICE_ID: "0000000000000208" }, depends_on: { ptp-follower: { condition: service_started }, bridge-08: { condition: service_started } } }
+  i2pipe-09: { <<: *i2pipe-common, command: ["mkdir -p /shared/tmp_r09 && sleep 5 && inferno2pipe -c 2 -o /shared/capture_09.raw"], environment: { <<: *i2pipe-env, TMPDIR: /shared/tmp_r09, INFERNO_NAME: rx09, INFERNO_DEVICE_ID: "0000000000000209" }, depends_on: { ptp-follower: { condition: service_started }, bridge-09: { condition: service_started } } }
+  i2pipe-10: { <<: *i2pipe-common, command: ["mkdir -p /shared/tmp_r10 && sleep 5 && inferno2pipe -c 2 -o /shared/capture_10.raw"], environment: { <<: *i2pipe-env, TMPDIR: /shared/tmp_r10, INFERNO_NAME: rx10, INFERNO_DEVICE_ID: "000000000000020a" }, depends_on: { ptp-follower: { condition: service_started }, bridge-10: { condition: service_started } } }
+  i2pipe-11: { <<: *i2pipe-common, command: ["mkdir -p /shared/tmp_r11 && sleep 5 && inferno2pipe -c 2 -o /shared/capture_11.raw"], environment: { <<: *i2pipe-env, TMPDIR: /shared/tmp_r11, INFERNO_NAME: rx11, INFERNO_DEVICE_ID: "000000000000020b" }, depends_on: { ptp-follower: { condition: service_started }, bridge-11: { condition: service_started } } }
+  i2pipe-12: { <<: *i2pipe-common, command: ["mkdir -p /shared/tmp_r12 && sleep 5 && inferno2pipe -c 2 -o /shared/capture_12.raw"], environment: { <<: *i2pipe-env, TMPDIR: /shared/tmp_r12, INFERNO_NAME: rx12, INFERNO_DEVICE_ID: "000000000000020c" }, depends_on: { ptp-follower: { condition: service_started }, bridge-12: { condition: service_started } } }
+  i2pipe-13: { <<: *i2pipe-common, command: ["mkdir -p /shared/tmp_r13 && sleep 5 && inferno2pipe -c 2 -o /shared/capture_13.raw"], environment: { <<: *i2pipe-env, TMPDIR: /shared/tmp_r13, INFERNO_NAME: rx13, INFERNO_DEVICE_ID: "000000000000020d" }, depends_on: { ptp-follower: { condition: service_started }, bridge-13: { condition: service_started } } }
+  i2pipe-14: { <<: *i2pipe-common, command: ["mkdir -p /shared/tmp_r14 && sleep 5 && inferno2pipe -c 2 -o /shared/capture_14.raw"], environment: { <<: *i2pipe-env, TMPDIR: /shared/tmp_r14, INFERNO_NAME: rx14, INFERNO_DEVICE_ID: "000000000000020e" }, depends_on: { ptp-follower: { condition: service_started }, bridge-14: { condition: service_started } } }
+  i2pipe-15: { <<: *i2pipe-common, command: ["mkdir -p /shared/tmp_r15 && sleep 5 && inferno2pipe -c 2 -o /shared/capture_15.raw"], environment: { <<: *i2pipe-env, TMPDIR: /shared/tmp_r15, INFERNO_NAME: rx15, INFERNO_DEVICE_ID: "000000000000020f" }, depends_on: { ptp-follower: { condition: service_started }, bridge-15: { condition: service_started } } }
+  i2pipe-16: { <<: *i2pipe-common, command: ["mkdir -p /shared/tmp_r16 && sleep 5 && inferno2pipe -c 2 -o /shared/capture_16.raw"], environment: { <<: *i2pipe-env, TMPDIR: /shared/tmp_r16, INFERNO_NAME: rx16, INFERNO_DEVICE_ID: "0000000000000210" }, depends_on: { ptp-follower: { condition: service_started }, bridge-16: { condition: service_started } } }
 
   # --- Test orchestrator ---
   control_and_test:

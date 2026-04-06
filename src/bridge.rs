@@ -1,9 +1,9 @@
 use std::sync::atomic::AtomicUsize;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
-use atomic::{Atomic, Ordering};
+use atomic::Atomic;
 use inferno_aoip::device_server::{
-    DeviceServer, ExternalBufferParameters, PositionReportDestination, Sample, Settings,
+    DeviceServer, OwnedBuffer, RBInput, Sample, Settings,
 };
 use log::{debug, error, info, warn};
 use sendspin::protocol::client::AudioChunk;
@@ -17,6 +17,7 @@ pub const CHANNELS: usize = 2;
 pub const RING_BUFFER_SIZE: usize = 131072; // ~2.7s at 48kHz, power of 2
 pub const SAMPLE_RATE: u32 = 48000;
 const METRICS_INTERVAL_SECS: u64 = 5;
+const HOLE_FIX_WAIT: usize = 4800; // ~100ms at 48kHz
 
 // ─── Bridge state machine ───────────────────────────────────────────
 //
@@ -38,124 +39,6 @@ enum BridgeState {
     Rebuffering,
 }
 
-// ─── Ring buffer ────────────────────────────────────────────────────
-
-struct AudioRingBuffer {
-    buffers: Vec<Vec<Atomic<i32>>>,
-    valid: Arc<RwLock<bool>>,
-    write_pos: usize,
-    pos_report_tab: Arc<Vec<AtomicUsize>>,
-}
-
-impl AudioRingBuffer {
-    fn new() -> Self {
-        let pos_report_tab = Arc::new(
-            (0..CHANNELS)
-                .map(|_| AtomicUsize::new(0))
-                .collect::<Vec<_>>(),
-        );
-        let buffers = (0..CHANNELS)
-            .map(|_| {
-                (0..RING_BUFFER_SIZE)
-                    .map(|_| Atomic::new(0i32))
-                    .collect()
-            })
-            .collect();
-        Self {
-            buffers,
-            valid: Arc::new(RwLock::new(true)),
-            write_pos: 0,
-            pos_report_tab,
-        }
-    }
-
-    fn as_external_params(&self) -> Vec<ExternalBufferParameters<Sample>> {
-        self.buffers
-            .iter()
-            .enumerate()
-            .map(|(ch, buf)| {
-                let pos_dest = PositionReportDestination::new(self.pos_report_tab.clone(), ch);
-                unsafe {
-                    ExternalBufferParameters::new(
-                        buf.as_ptr(),
-                        buf.len(),
-                        1,
-                        self.valid.clone(),
-                        Some(pos_dest),
-                    )
-                }
-            })
-            .collect()
-    }
-
-    fn read_pos(&self) -> usize {
-        self.pos_report_tab[0].load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    fn write_pcm_24bit_le(&mut self, data: &[u8]) -> usize {
-        let bytes_per_sample = 3;
-        let frame_size = bytes_per_sample * CHANNELS;
-        let frames = data.len() / frame_size;
-        for frame in 0..frames {
-            let ring_pos = self.write_pos % RING_BUFFER_SIZE;
-            let frame_offset = frame * frame_size;
-            for ch in 0..CHANNELS {
-                let offset = frame_offset + ch * bytes_per_sample;
-                let b = &data[offset..offset + 3];
-                let raw = (b[0] as i32) | ((b[1] as i32) << 8) | ((b[2] as i32) << 16);
-                let sign_extended = (raw << 8) >> 8;
-                self.buffers[ch][ring_pos].store(sign_extended << 8, Ordering::Release);
-            }
-            self.write_pos = self.write_pos.wrapping_add(1);
-        }
-        frames
-    }
-
-    fn write_pcm_16bit_le(&mut self, data: &[u8]) -> usize {
-        let bytes_per_sample = 2;
-        let frame_size = bytes_per_sample * CHANNELS;
-        let frames = data.len() / frame_size;
-        for frame in 0..frames {
-            let ring_pos = self.write_pos % RING_BUFFER_SIZE;
-            let frame_offset = frame * frame_size;
-            for ch in 0..CHANNELS {
-                let offset = frame_offset + ch * bytes_per_sample;
-                let b = &data[offset..offset + 2];
-                let raw = i16::from_le_bytes([b[0], b[1]]) as i32;
-                self.buffers[ch][ring_pos].store(raw << 16, Ordering::Release);
-            }
-            self.write_pos = self.write_pos.wrapping_add(1);
-        }
-        frames
-    }
-
-    /// Zero-fill a range of ring buffer positions [start, start+count).
-    fn zero_range(&mut self, start: usize, count: usize) {
-        for i in 0..count {
-            let ring_pos = start.wrapping_add(i) % RING_BUFFER_SIZE;
-            for ch in 0..CHANNELS {
-                self.buffers[ch][ring_pos].store(0, Ordering::Release);
-            }
-        }
-    }
-
-    /// Zero the entire ring buffer. Used on StreamEnd and reconnect
-    /// to ensure no stale audio loops via unconditional_read().
-    fn zero_all(&mut self) {
-        for ch in 0..CHANNELS {
-            for i in 0..RING_BUFFER_SIZE {
-                self.buffers[ch][i].store(0, Ordering::Release);
-            }
-        }
-    }
-
-    fn invalidate(&self) {
-        if let Ok(mut v) = self.valid.write() {
-            *v = false;
-        }
-    }
-}
-
 // ─── Stream format ──────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
@@ -175,16 +58,19 @@ pub struct SendspinBridge {
     buffer_ms: u32,
     state: BridgeState,
     // Device + TX state (persistent for process lifetime)
-    ring_buffer: Option<AudioRingBuffer>,
+    rb_inputs: Option<Vec<RBInput<Sample, OwnedBuffer<Atomic<Sample>>>>>,
     device_server: Option<DeviceServer>,
     current_timestamp: Arc<AtomicUsize>,
+    /// The actual ring buffer position the FlowsTransmitter reads from.
+    /// This is `start_ts = next_ts + timestamp_shift` — the true consumer cursor.
+    read_position: Arc<AtomicUsize>,
     // Stream state (reset per stream)
+    write_pos: usize,
     prebuffer_target: usize,
     prebuffer_written: usize,
     stream_format: Option<StreamFormat>,
     metrics: BufferMetrics,
     last_read_pos: usize,
-    /// When WaitingForSubscriber started (for timeout fallback).
     waiting_since: Option<std::time::Instant>,
 }
 
@@ -197,9 +83,11 @@ impl SendspinBridge {
             client_id,
             buffer_ms,
             state: BridgeState::Idle,
-            ring_buffer: None,
+            rb_inputs: None,
             device_server: None,
             current_timestamp: Arc::new(AtomicUsize::new(usize::MAX)),
+            read_position: Arc::new(AtomicUsize::new(usize::MAX)),
+            write_pos: 0,
             prebuffer_target,
             prebuffer_written: 0,
             stream_format: None,
@@ -210,11 +98,7 @@ impl SendspinBridge {
     }
 
     pub async fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Start DANTE device + TX once for the entire process lifetime.
-        // This blocks until the PTP clock is available.
         self.start_device().await;
-
-        // Outer reconnect loop for Sendspin
         loop {
             match self.run_session().await {
                 Ok(()) => {
@@ -231,13 +115,7 @@ impl SendspinBridge {
         }
     }
 
-    /// Start DANTE device and TX. Called once at process startup.
-    /// Blocks until PTP clock is available.
     async fn start_device(&mut self) {
-        let mut ring_buffer = AudioRingBuffer::new();
-        ring_buffer.zero_all(); // start silent
-        let params = ring_buffer.as_external_params();
-
         let short_name = self.device_name.chars().take(14).collect::<String>();
         let mut config = std::collections::BTreeMap::new();
         config.insert("NAME".to_string(), self.device_name.clone());
@@ -252,12 +130,17 @@ impl SendspinBridge {
         let (start_tx, start_rx) = oneshot::channel();
         self.current_timestamp
             .store(usize::MAX, std::sync::atomic::Ordering::SeqCst);
+        self.read_position
+            .store(usize::MAX, std::sync::atomic::Ordering::SeqCst);
 
-        server
-            .transmit_from_external_buffer(
-                params,
+        let rb_inputs = server
+            .transmit_from_owned_buffer(
+                CHANNELS,
+                RING_BUFFER_SIZE,
+                HOLE_FIX_WAIT,
                 start_rx,
                 self.current_timestamp.clone(),
+                self.read_position.clone(),
                 None,
             )
             .await;
@@ -265,8 +148,12 @@ impl SendspinBridge {
         info!("FlowsTransmitter started (start_time=0, idle with silence)");
         let _ = start_tx.send(0);
 
-        self.ring_buffer = Some(ring_buffer);
+        // RBInput starts at position 0 with nothing written — readable_pos is 0.
+        // FlowsTransmitter reads at 0 and gets zeros (hole_fix fills with default).
+
+        self.rb_inputs = Some(rb_inputs);
         self.device_server = Some(server);
+        self.write_pos = 0;
         self.state = BridgeState::Idle;
     }
 
@@ -355,7 +242,6 @@ impl SendspinBridge {
                         return;
                     }
 
-                    // If already running with same format, treat as stream boundary
                     if self.state == BridgeState::Running
                         && self.stream_format.as_ref() == Some(&format)
                     {
@@ -366,8 +252,8 @@ impl SendspinBridge {
 
                     self.stream_format = Some(format);
 
-                    // Check if subscriber is already active (pre-existing subscription)
-                    let read_pos = self.ring_buffer.as_ref().map_or(0, |rb| rb.read_pos());
+                    // Check if subscriber is already active
+                    let read_pos = self.get_read_pos();
                     if read_pos != 0 && read_pos != self.last_read_pos {
                         info!("subscriber already active (read_pos={}), snapping to live", read_pos);
                         self.snap_to_live();
@@ -394,10 +280,25 @@ impl SendspinBridge {
         }
     }
 
-    /// Enter idle: zero ring, reset stream state. Device + TX stay alive.
+    /// Get the actual ring buffer read position from the FlowsTransmitter.
+    /// This is `start_ts = next_ts + timestamp_shift` — the true consumer cursor.
+    /// Returns 0 if the transmitter hasn't started reading yet.
+    fn get_read_pos(&self) -> usize {
+        let pos = self.read_position.load(std::sync::atomic::Ordering::Relaxed);
+        if pos == usize::MAX { 0 } else { pos }
+    }
+
     fn enter_idle(&mut self) {
-        if let Some(rb) = &mut self.ring_buffer {
-            rb.zero_all();
+        // Write silence to clear stale audio. Write in two halves to avoid
+        // triggering RBInput's assertion (input_len must be < items_size).
+        if let Some(inputs) = &mut self.rb_inputs {
+            let half = RING_BUFFER_SIZE / 2;
+            for rb in inputs.iter_mut() {
+                let silence: Vec<Sample> = vec![0; half];
+                rb.write_from_at(self.write_pos, silence.clone().into_iter());
+                rb.write_from_at(self.write_pos.wrapping_add(half), silence.into_iter());
+            }
+            self.write_pos = self.write_pos.wrapping_add(RING_BUFFER_SIZE);
         }
         self.stream_format = None;
         self.prebuffer_written = 0;
@@ -406,17 +307,20 @@ impl SendspinBridge {
         self.metrics.reset();
     }
 
-    /// Snap write_pos to live position and enter prebuffering.
     fn snap_to_live(&mut self) {
-        if let Some(rb) = &mut self.ring_buffer {
-            let read_pos = rb.read_pos();
-            rb.zero_range(read_pos, self.prebuffer_target);
-            rb.write_pos = read_pos.wrapping_add(self.prebuffer_target);
-            info!(
-                "snapped to live: read_pos={}, write_pos={}",
-                read_pos, rb.write_pos
-            );
+        let read_pos = self.get_read_pos();
+        // Write silence for the prebuffer region
+        if let Some(inputs) = &mut self.rb_inputs {
+            let silence: Vec<Sample> = vec![0; self.prebuffer_target];
+            for rb in inputs.iter_mut() {
+                rb.write_from_at(read_pos, silence.clone().into_iter());
+            }
         }
+        self.write_pos = read_pos.wrapping_add(self.prebuffer_target);
+        info!(
+            "snapped to live: read_pos={}, write_pos={}",
+            read_pos, self.write_pos
+        );
         self.prebuffer_written = 0;
         self.state = BridgeState::Prebuffering;
         self.metrics.reset();
@@ -426,17 +330,19 @@ impl SendspinBridge {
         );
     }
 
-    /// Discard stale buffered audio and enter rebuffer mode.
     fn clear_and_rebuffer(&mut self) {
-        if let Some(rb) = &mut self.ring_buffer {
-            let read_pos = rb.read_pos();
-            rb.zero_range(read_pos, self.prebuffer_target);
-            rb.write_pos = read_pos.wrapping_add(self.prebuffer_target);
-            info!(
-                "cleared stale audio: zeroed [{}, +{}), write_pos={}",
-                read_pos, self.prebuffer_target, rb.write_pos
-            );
+        let read_pos = self.get_read_pos();
+        if let Some(inputs) = &mut self.rb_inputs {
+            let silence: Vec<Sample> = vec![0; self.prebuffer_target];
+            for rb in inputs.iter_mut() {
+                rb.write_from_at(read_pos, silence.clone().into_iter());
+            }
         }
+        self.write_pos = read_pos.wrapping_add(self.prebuffer_target);
+        info!(
+            "cleared stale audio: zeroed [{}, +{}), write_pos={}",
+            read_pos, self.prebuffer_target, self.write_pos
+        );
         self.prebuffer_written = 0;
         self.state = BridgeState::Rebuffering;
         self.metrics.reset();
@@ -445,34 +351,87 @@ impl SendspinBridge {
     fn handle_audio(&mut self, chunk: AudioChunk) {
         let format = match &self.stream_format {
             Some(f) => f.clone(),
-            None => return, // Idle or no format — drop silently
-        };
-
-        let rb = match &mut self.ring_buffer {
-            Some(rb) => rb,
             None => return,
         };
 
-        let frames_written = match format.bit_depth {
-            24 => rb.write_pcm_24bit_le(&chunk.data),
-            16 => rb.write_pcm_16bit_le(&chunk.data),
+        let inputs = match &mut self.rb_inputs {
+            Some(inputs) => inputs,
+            None => return,
+        };
+
+        // Decode PCM and write per-channel via RBInput::write_from_at
+        let frames = match format.bit_depth {
+            24 => {
+                let bytes_per_sample = 3;
+                let frame_size = bytes_per_sample * CHANNELS;
+                let frames = chunk.data.len() / frame_size;
+                let write_pos = self.write_pos;
+
+                for ch in 0..CHANNELS {
+                    let samples = (0..frames).map(|frame| {
+                        let offset = frame * frame_size + ch * bytes_per_sample;
+                        let b = &chunk.data[offset..offset + 3];
+                        let raw = (b[0] as i32) | ((b[1] as i32) << 8) | ((b[2] as i32) << 16);
+                        let sign_extended = (raw << 8) >> 8;
+                        sign_extended << 8
+                    });
+                    inputs[ch].write_from_at(write_pos, samples);
+                }
+                frames
+            }
+            16 => {
+                let bytes_per_sample = 2;
+                let frame_size = bytes_per_sample * CHANNELS;
+                let frames = chunk.data.len() / frame_size;
+                let write_pos = self.write_pos;
+
+                for ch in 0..CHANNELS {
+                    let samples = (0..frames).map(|frame| {
+                        let offset = frame * frame_size + ch * bytes_per_sample;
+                        let b = &chunk.data[offset..offset + 2];
+                        let raw = i16::from_le_bytes([b[0], b[1]]) as i32;
+                        raw << 16
+                    });
+                    inputs[ch].write_from_at(write_pos, samples);
+                }
+                frames
+            }
             _ => 0,
         };
 
-        // In WaitingForSubscriber, check if read_pos started advancing.
-        // If the clock never becomes available (common in Docker with fake clock),
-        // fall back to Prebuffering after a timeout so audio still flows.
+        self.write_pos = self.write_pos.wrapping_add(frames);
+
+        // Check if read_pos became valid and we need to realign.
+        // This handles the case where the PTP clock takes time to warm up:
+        // we may have started writing at local domain 0, but now read_pos
+        // shows the actual PTP-domain position the FlowsTransmitter reads from.
+        let read_pos = self.get_read_pos();
+        if read_pos != 0 {
+            let distance = if self.write_pos > read_pos {
+                self.write_pos - read_pos
+            } else {
+                read_pos - self.write_pos
+            };
+            // If write_pos is way out of alignment (more than ring buffer apart),
+            // snap to live regardless of current state
+            if distance > RING_BUFFER_SIZE {
+                info!(
+                    "write/read misalignment detected (write_pos={}, read_pos={}, distance={}), snapping to live",
+                    self.write_pos, read_pos, distance
+                );
+                self.snap_to_live();
+                return;
+            }
+        }
+
+        // WaitingForSubscriber: check if read_pos started advancing
         if self.state == BridgeState::WaitingForSubscriber {
-            let read_pos = self.ring_buffer.as_ref().unwrap().read_pos();
             if read_pos != self.last_read_pos && read_pos != 0 {
-                // Subscriber active + clock working — snap to live
                 info!("subscriber detected (read_pos={}), snapping to live", read_pos);
                 self.waiting_since = None;
                 self.snap_to_live();
             } else if self.waiting_since.map_or(false, |t| t.elapsed().as_secs() >= 5) {
-                // Timeout: clock may not be delivering read_pos updates.
-                // Fall back to prebuffering from current write_pos.
-                info!("subscriber wait timed out (5s), entering prebuffering (clock may still be warming up)");
+                info!("subscriber wait timed out (5s), entering prebuffering without alignment");
                 self.waiting_since = None;
                 self.prebuffer_written = 0;
                 self.state = BridgeState::Prebuffering;
@@ -482,26 +441,21 @@ impl SendspinBridge {
             return;
         }
 
-        // Prebuffering/Rebuffering: accumulate fresh audio
+        // Prebuffering/Rebuffering
         if self.state == BridgeState::Prebuffering || self.state == BridgeState::Rebuffering {
-            self.prebuffer_written += frames_written;
+            self.prebuffer_written += frames;
             if self.prebuffer_written >= self.prebuffer_target {
                 self.state = BridgeState::Running;
-                if let Some(rb) = &self.ring_buffer {
-                    let read = rb.read_pos();
-                    let fill = rb.write_pos.wrapping_sub(read) as isize;
-                    info!(
-                        "prebuffer complete ({} samples), fill={}, now transmitting",
-                        self.prebuffer_written, fill
-                    );
-                }
+                let fill = self.write_pos.wrapping_sub(read_pos) as isize;
+                info!(
+                    "prebuffer complete ({} samples), fill={}, read_pos={}, now transmitting",
+                    self.prebuffer_written, fill, read_pos
+                );
             }
         }
 
         // Update metrics
-        if let Some(rb) = &self.ring_buffer {
-            self.metrics.update(rb.write_pos, rb.read_pos());
-        }
+        self.metrics.update(self.write_pos, self.get_read_pos());
     }
 
     fn log_metrics(&mut self) {
@@ -511,25 +465,19 @@ impl SendspinBridge {
                 info!("[buffer] waiting for DANTE subscriber");
             }
             BridgeState::Running => {
-                if let Some(rb) = &self.ring_buffer {
-                    self.metrics.log(rb.write_pos, rb.read_pos());
-                }
+                self.metrics.log(self.write_pos, self.get_read_pos());
             }
             _ => {}
         }
     }
 
-    /// Full shutdown — only on process exit.
     async fn shutdown(&mut self) {
-        if let Some(rb) = &self.ring_buffer {
-            rb.invalidate();
-        }
         if let Some(mut server) = self.device_server.take() {
             info!("stopping DANTE device");
             server.stop_transmitter().await;
             server.shutdown().await;
         }
-        self.ring_buffer = None;
+        self.rb_inputs = None;
         self.state = BridgeState::Idle;
         info!("bridge shutdown complete");
     }

@@ -98,7 +98,8 @@ Six Docker containers on a shared bridge network:
 | Container | Image | Role |
 |-----------|-------|------|
 | `init` | `alpine:3` | Clears the shared volume before each run |
-| `clock_source` | Built from `inferno/test/dockerized_trx/fake_usrvclock_server` | Fake PTP clock. Creates a Unix datagram socket at `/shared/usrvclock` |
+| `ptp-master` | Built from `statime/` | PTPv2 clock master (reference clock) |
+| `ptp-follower` | Built from `statime/` | PTPv2 clock follower — syncs to master, exports usrvclock |
 | `sendspin_source` | `python:3.13-alpine` + `pip install sendspin` | Generates a 30s 1kHz sine WAV, serves it via `sendspin serve` on port 8927 |
 | `bridge` | Built from this repo's `Dockerfile` | The bridge under test. Connects to sendspin_source, transmits as DANTE device "SSBridge" |
 | `i2pipe` | `inferno_aoip:alpine-i2pipe` (pre-built) | DANTE receiver. Captures audio to `/shared/capture.raw` |
@@ -106,12 +107,12 @@ Six Docker containers on a shared bridge network:
 
 ## Critical: The usrvclock TMPDIR Gotcha
 
-The fake PTP clock uses Unix datagram sockets. The server creates a socket at `/shared/usrvclock`. Each client (bridge, i2pipe) creates a response socket in `$TMPDIR`. The server sends clock overlays back to these client sockets.
+The Statime PTP follower exports clock overlays via Unix datagram sockets (usrvclock protocol). The server creates a socket at `/shared/usrvclock`. Each client (bridge, i2pipe) creates a response socket in `$TMPDIR`. The server sends clock overlays back to these client sockets.
 
 **The client TMPDIR must be on the shared Docker volume.** If TMPDIR is `/tmp` (container-local), the clock_source container can't reach the client sockets and you get:
 
 ```
-clock_source  | sendto failed: No such file or directory
+ptp-follower  | sendto failed: No such file or directory
 bridge        | clock unavailable, can't transmit. is the PTP daemon running?
 ```
 
@@ -300,28 +301,59 @@ Sync quality thresholds:
 
 ### Resource requirements
 
-11 containers total (4 bridges + 4 receivers + clock + source + control). Each inferno DeviceServer uses a real-time thread. Expect:
+35 containers total (16 bridges + 16 receivers + clock + source + control). Each inferno DeviceServer uses a real-time thread. Expect:
 - ~2-3GB RAM
 - Significant CPU during startup (all containers building/initializing in parallel)
 - ~3-4 minutes total runtime (builds + discovery timeout + 20s recording)
 
 ### Container naming
 
-Each bridge/receiver needs a unique `INFERNO_DEVICE_ID` to avoid mDNS conflicts. The compose file assigns sequential IDs:
-- Bridges: `0000000000000101` through `0000000000000104`
-- Receivers: `0000000000000201` through `0000000000000204`
+The test harness uses explicit `INFERNO_DEVICE_ID` values (not `PROCESS_ID`/`ALT_PORT`) because all containers are on a Docker bridge network with unique IPs, unlike production where all bridges share the host IP. This is a harness-specific shortcut.
+- Bridge IDs: `0000000000000101` through `0000000000000110`
+- Receiver IDs: `0000000000000201` through `0000000000000210`
 
-## Real PTP Test (`make test-ptp`)
+## PTP Clock Architecture (all tests)
 
-**Status: not functional in pure Docker.** This test infrastructure exists but requires real DANTE hardware on the LAN. For CI/Docker-only testing, use `make test` instead.
+All tests use real PTPv2 clock synchronization via two Statime instances:
 
-Uses [Statime](https://github.com/teodly/statime/tree/inferno-dev) (PTP daemon) instead of `fake_usrvclock_server`. The test compose (`test/docker-compose.ptp.yml`) runs Statime on a Docker bridge network with PTPv1, software timestamps (`hardware-clock = "none"`). It shares the production Statime config from `statime/statime-docker.toml`.
+```
+┌────────────────────┐
+│  Statime PTPv2     │ ← PTP master (clock reference)
+│  MASTER            │    Does NOT export usrvclock
+└────────┬───────────┘
+         │ PTP sync messages (multicast)
+         ▼
+┌────────────────────┐
+│  Statime PTPv2     │ ← PTP follower (syncs to master)
+│  FOLLOWER          │    EXPORTS usrvclock overlays
+└────────┬───────────┘
+         │ usrvclock (Unix datagram socket)
+         ▼
+┌────────────────────┐     ┌──────────────────┐
+│  spin2dante bridge │ ──→ │ inferno2pipe     │
+│  (DANTE TX)        │     │ (DANTE RX)       │
+└────────────────────┘     └──────────────────┘
+         ↑                          ↑
+         └──── both read from ──────┘
+               /shared/usrvclock
+```
 
-### Why this doesn't work in pure Docker
+### Why master + follower
 
-Statime as a PTPv1 follower with no PTP master on the network never receives sync messages, so it never exports clock overlays via usrvclock. Inferno's FlowsTransmitter permanently reports "clock unavailable." The `fake_usrvclock_server` avoids this by sending unconditional periodic updates regardless of PTP state.
+Only PTP **followers** export usrvclock overlays. A master doesn't adjust its clock, so the overlay export callback never fires. The follower syncs to the master and exports overlays that inferno reads.
 
-To actually use this test, you need DANTE hardware on the network as PTP master, and Statime must be able to reach it (may require `network_mode: host` on the Statime container in the test compose).
+### Auto-realignment
+
+The bridge starts writing at local-domain position 0. When the PTP clock warms up and the FlowsTransmitter starts reading at PTP-domain positions (~140 billion), the bridge detects the misalignment (write_pos and read_pos more than ring buffer size apart) and calls `snap_to_live()` to realign write_pos to the PTP domain.
+
+### Config files
+
+- `statime/statime-ptpv2-master.toml` — PTPv2 master, no usrvclock export
+- `statime/statime-ptpv2-follower.toml` — PTPv2 follower, exports usrvclock
+
+### Timing notes
+
+The follower needs ~10-15s to sync with the master and start exporting overlays. The bridge auto-realigns once the clock becomes available — no manual timing coordination needed.
 
 ## Edge Case Behavior
 
@@ -333,7 +365,7 @@ Tested and validated via `make test-resilience`:
 | **Stream seek (StreamClear)** | Stale buffered audio is zeroed from current read position. Bridge enters rebuffer mode, refills jitter buffer with fresh data, then resumes. |
 | **Stream ends (StreamEnd)** | Ring zeroed, bridge enters Idle. DANTE device stays on network. |
 | **New stream with same format (StreamStart, already Running)** | Stale audio cleared, rebuffer mode, no device restart. |
-| **New stream with different format** | DANTE device fully restarted with new settings. |
+| **New stream with different format** | Format validated; if supported (PCM 16/24-bit), stream_format updated and enters WaitingForSubscriber. Unsupported formats rejected. Device is NOT restarted. |
 | **PTP master disappears** | Statime stops exporting clock overlays. FlowsTransmitter reports "clock unavailable" until PTP master returns. Audio stops but bridge stays alive. |
 | **Multiple StreamStart without StreamEnd** | If already Running with same format: clear + rebuffer. Otherwise: enter WaitingForSubscriber. |
 
@@ -341,6 +373,6 @@ Tested and validated via `make test-resilience`:
 
 - **No automated pass/fail**: The test checks signal presence but doesn't verify bit-perfect output or exact waveform shape. WavDiff comparison is planned.
 - **Sendspin source codec**: The `sendspin serve` command decides the codec. With a local WAV file it typically sends PCM, but behavior may vary by version.
-- **FlowsTransmitter startup delay**: 10-20s of "clock unavailable" is normal while the PTP clock propagates through inferno's internal channels. The fake_usrvclock_server sends overlays every 1 second; real Statime may take longer to converge.
+- **PTP clock warmup**: 10-15s of "clock unavailable" is normal while the Statime follower syncs to the master. The bridge auto-realigns once the clock becomes available.
 - **Single-run test audio**: The 30s test tone loops only if sendspin loops it. After 30s, the stream may end.
 - **FLAC not testable**: sendspin-rs v0.1 only has a PCM decoder. FLAC testing requires either a newer sendspin-rs or a custom decoder.
