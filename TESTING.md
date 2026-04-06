@@ -326,14 +326,17 @@ Uses [Statime](https://github.com/teodly/statime/tree/inferno-dev) (a real PTP d
 
 ### How it works
 
-- Statime runs as PTPv2 leader (master) with `virtual-system-clock-base = "monotonic_raw"` and `hardware-clock = "none"` (software timestamps, no real NIC PTP)
+- Statime runs as PTPv2 follower with `virtual-system-clock-base = "monotonic_raw"`
+- It syncs against a PTP master (typically a DANTE device on the network)
 - It creates the usrvclock socket at `/shared/usrvclock` via `usrvclock-export = true`
 - All inferno containers read from this socket — same interface as the fake server
 - Statime needs `CAP_SYS_TIME` capability (granted via `cap_add` in compose)
 
-### First run
+### Requirements
 
-The Statime Docker image builds from source (~3-5 min on first run). Subsequent runs use the cached image.
+- **Real DANTE hardware** on the network acting as PTP master
+- **Host with a globally-administered MAC address** (bare metal, not VM/Docker)
+- The Statime Docker image builds from source (~3-5 min on first run)
 
 ```sh
 make test-ptp
@@ -342,31 +345,16 @@ make test-ptp
 ### Config file
 
 The Statime config is at `test/statime/statime-docker.toml`. Key settings:
-- `protocol-version = "PTPv2"` — PTPv2 for leader capability
-- `priority1 = 128` — become PTP master in the Docker network
+- `protocol-version = "PTPv2"` — PTPv2 protocol
+- `priority1 = 251` — high value = prefer to be PTP follower
 - `usrvclock-export = true` — export clock via usrvclock protocol
 - `usrvclock-path = "/shared/usrvclock"` — socket on shared volume
-- `hardware-clock = "none"` — software timestamps (no real PTP hardware in Docker)
-- `interface = "eth0"` — Docker's default interface
+- `hardware-clock = "auto"` — auto-detect hardware timestamping
+- `interface = "eth0"` — auto-detected by entrypoint script
 
-### Known issue: Statime panics on Docker virtual NICs
+### Why this doesn't work in pure Docker
 
-Statime's `main.rs` has a bug where `get_clock_id()` is evaluated eagerly via `unwrap_or` even when `config.identity` is set:
-
-```rust
-// This evaluates get_clock_id() even when identity is Some(...)
-let clock_identity = config.identity.unwrap_or(
-    ClockIdentity(get_clock_id(&allowed_interfaces).expect("could not get clock identity"))
-);
-// Should be unwrap_or_else(|| ...) for lazy evaluation
-```
-
-Docker's virtual NICs have locally-administered MACs (`02:xx:xx`) which `get_clock_id` rejects, causing a panic. Workarounds:
-- Run Statime with `network_mode: host` on a machine with a physical NIC
-- Patch Statime to use `unwrap_or_else` (upstream fix needed)
-- Use the `fake_usrvclock_server` for CI (the `make test` path)
-
-The PTP test (`make test-ptp`) requires a host environment where Statime can detect a valid NIC MAC address.
+A standalone PTP master with no followers never exports clock overlays via usrvclock — it has nothing to synchronize against. The fake_usrvclock_server used by `make test` avoids this by sending unconditional periodic updates. For CI/Docker-only testing, `make test` is the correct path.
 
 ## Known Limitations
 

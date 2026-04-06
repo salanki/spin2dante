@@ -21,13 +21,11 @@ services:
   # Real PTP clock source using Statime
   statime:
     build:
-      context: ./statime
+      context: ../statime
     volumes:
       - shared:/shared
-    # Statime needs a real NIC with a globally-administered MAC address
-    # to derive its clock identity (bug: eager evaluation in unwrap_or).
-    # Use host network so it can see the host's physical NIC.
-    network_mode: host
+    networks:
+      - audio_net
     cap_add:
       - SYS_TIME    # Required for clock operations
       - NET_BIND_SERVICE
@@ -58,7 +56,7 @@ services:
       INFERNO_RX_CHANNELS: "0"
       INFERNO_SAMPLE_RATE: "48000"
       TMPDIR: /shared/tmp_bridge
-      RUST_LOG: "info"
+      RUST_LOG: "info,usrvclock=debug"
     volumes:
       - shared:/shared
     networks:

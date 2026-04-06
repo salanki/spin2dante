@@ -1,0 +1,29 @@
+# Statime PTPv2 configuration for real hardware testing.
+#
+# Runs as PTP follower using software timestamps on CLOCK_MONOTONIC_RAW.
+# Exports clock to inferno devices via the usrvclock protocol socket.
+#
+# Requirements:
+# - Real DANTE devices on the network (PTP master source)
+# - Host with a globally-administered MAC address (not a VM/Docker veth)
+# - CAP_SYS_TIME capability
+
+loglevel = "info"
+
+sdo-id = 0
+domain = 0
+priority1 = 251
+priority2 = 128
+
+virtual-system-clock = true
+virtual-system-clock-base = "monotonic_raw"
+
+# Export clock via usrvclock protocol — inferno reads from this socket
+usrvclock-export = true
+usrvclock-path = "/shared/usrvclock"
+
+[[port]]
+interface = "eth0"
+network-mode = "ipv4"
+hardware-clock = "auto"
+protocol-version = "PTPv2"

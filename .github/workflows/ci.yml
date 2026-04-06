@@ -9,31 +9,59 @@ permissions:
   contents: read
 
 env:
-  BINARY_NAME: spin2dante
   CARGO_TERM_COLOR: always
+  STATIME_REPOSITORY: https://github.com/teodly/statime.git
+  STATIME_REF: inferno-dev
 
 jobs:
-  build-release:
-    name: Build ${{ matrix.name }}
+  build-binaries:
+    name: Build ${{ matrix.artifact_name }} (${{ matrix.archive_suffix }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: linux-amd64
+          - artifact_name: spin2dante
+            source_dir: .
             target: x86_64-unknown-linux-gnu
             archive_suffix: linux-amd64
             apt_packages: libasound2-dev
             linker: ""
-          - name: linux-arm64
+            build_command: cargo build --release --target x86_64-unknown-linux-gnu
+            package_path: target/x86_64-unknown-linux-gnu/release/spin2dante
+          - artifact_name: spin2dante
+            source_dir: .
             target: aarch64-unknown-linux-gnu
             archive_suffix: linux-arm64
             apt_packages: gcc-aarch64-linux-gnu libc6-dev-arm64-cross libasound2-dev:arm64
             linker: aarch64-linux-gnu-gcc
+            build_command: cargo build --release --target aarch64-unknown-linux-gnu
+            package_path: target/aarch64-unknown-linux-gnu/release/spin2dante
+          - artifact_name: statime
+            source_dir: statime-src
+            target: x86_64-unknown-linux-gnu
+            archive_suffix: linux-amd64
+            apt_packages: ""
+            linker: ""
+            build_command: cargo build --release --target x86_64-unknown-linux-gnu -p statime-linux
+            package_path: target/x86_64-unknown-linux-gnu/release/statime
+          - artifact_name: statime
+            source_dir: statime-src
+            target: aarch64-unknown-linux-gnu
+            archive_suffix: linux-arm64
+            apt_packages: gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+            linker: aarch64-linux-gnu-gcc
+            build_command: cargo build --release --target aarch64-unknown-linux-gnu -p statime-linux
+            package_path: target/aarch64-unknown-linux-gnu/release/statime
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Check out Statime source
+        if: matrix.artifact_name == 'statime'
+        run: |
+          git clone --depth 1 --recurse-submodules --shallow-submodules             --branch "$STATIME_REF"             "$STATIME_REPOSITORY"             statime-src
 
       - name: Enable arm64 apt packages
         if: matrix.target == 'aarch64-unknown-linux-gnu'
@@ -55,11 +83,11 @@ jobs:
           sudo apt-get             -o Dir::Etc::sourcelist=/dev/null             -o Dir::Etc::sourceparts=/tmp/spin2dante-cross-apt             -o APT::Get::List-Cleanup=0             update
 
       - name: Install system dependencies
-        if: matrix.target != 'aarch64-unknown-linux-gnu'
+        if: matrix.apt_packages != '' && matrix.target != 'aarch64-unknown-linux-gnu'
         run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt_packages }}
 
       - name: Install cross-compilation dependencies
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        if: matrix.apt_packages != '' && matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo apt-get             -o Dir::Etc::sourcelist=/dev/null             -o Dir::Etc::sourceparts=/tmp/spin2dante-cross-apt             install -y ${{ matrix.apt_packages }}
 
@@ -71,28 +99,31 @@ jobs:
       - name: Cache Cargo build data
         uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: ${{ matrix.artifact_name }}-${{ matrix.target }}
+          workspaces: |
+            ${{ matrix.source_dir }} -> target
 
       - name: Build release binary
+        working-directory: ${{ matrix.source_dir }}
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.linker }}
           PKG_CONFIG_ALLOW_CROSS: "1"
           PKG_CONFIG_PATH_aarch64_unknown_linux_gnu: /usr/lib/aarch64-linux-gnu/pkgconfig
           PKG_CONFIG_LIBDIR_aarch64_unknown_linux_gnu: /usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
-        run: cargo build --release --target ${{ matrix.target }}
+        run: ${{ matrix.build_command }}
 
       - name: Package artifact
         run: |
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/${BINARY_NAME}" "dist/${BINARY_NAME}"
-          tar -C dist -czf "${BINARY_NAME}-${{ matrix.archive_suffix }}.tar.gz" "${BINARY_NAME}"
-          sha256sum "${BINARY_NAME}-${{ matrix.archive_suffix }}.tar.gz" > "${BINARY_NAME}-${{ matrix.archive_suffix }}.sha256"
+          cp "${{ matrix.source_dir }}/${{ matrix.package_path }}" "dist/${{ matrix.artifact_name }}"
+          tar -C dist -czf "${{ matrix.artifact_name }}-${{ matrix.archive_suffix }}.tar.gz" "${{ matrix.artifact_name }}"
+          sha256sum "${{ matrix.artifact_name }}-${{ matrix.archive_suffix }}.tar.gz" > "${{ matrix.artifact_name }}-${{ matrix.archive_suffix }}.sha256"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.BINARY_NAME }}-${{ matrix.archive_suffix }}
+          name: ${{ matrix.artifact_name }}-${{ matrix.archive_suffix }}
           path: |
-            ${{ env.BINARY_NAME }}-${{ matrix.archive_suffix }}.tar.gz
-            ${{ env.BINARY_NAME }}-${{ matrix.archive_suffix }}.sha256
+            ${{ matrix.artifact_name }}-${{ matrix.archive_suffix }}.tar.gz
+            ${{ matrix.artifact_name }}-${{ matrix.archive_suffix }}.sha256
           if-no-files-found: error

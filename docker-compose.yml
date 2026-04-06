@@ -1,0 +1,61 @@
+## spin2dante production deployment template
+##
+## Usage:
+##   1. Edit the bridge services below (name, URL, device ID)
+##   2. Adjust the Statime config in statime/statime-docker.toml (interface)
+##   3. docker compose up -d
+##
+## All services use host networking for:
+##   - Statime: accurate PTP timestamps from the real NIC
+##   - Bridges: DANTE multicast traffic on the LAN
+##
+## The usrvclock socket is shared via a host path mount so Statime's
+## clock overlay reaches all bridge containers.
+
+x-bridge: &bridge
+  image: spin2dante
+  build:
+    context: .
+    dockerfile: Dockerfile
+  network_mode: host
+  volumes:
+    - ${SPIN2DANTE_SHARED:-/tmp/spin2dante}:/shared
+  environment: &bridge-env
+    INFERNO_CLOCK_PATH: /shared/usrvclock
+    INFERNO_SAMPLE_RATE: "48000"
+    INFERNO_TX_CHANNELS: "2"
+    INFERNO_RX_CHANNELS: "0"
+  restart: unless-stopped
+  depends_on:
+    statime:
+      condition: service_started
+
+services:
+  statime:
+    build:
+      context: ./statime
+    network_mode: host
+    cap_add:
+      - SYS_TIME
+    volumes:
+      - ${SPIN2DANTE_SHARED:-/tmp/spin2dante}:/shared
+    restart: unless-stopped
+
+  ## --- Add one service per Sendspin source / DANTE zone ---
+  ## Each bridge needs a unique INFERNO_DEVICE_ID and TMPDIR.
+
+  # bridge-kitchen:
+  #   <<: *bridge
+  #   command: ["--url", "ws://music-assistant:8927/sendspin", "--name", "Kitchen"]
+  #   environment:
+  #     <<: *bridge-env
+  #     INFERNO_DEVICE_ID: "0000000000000001"
+  #     TMPDIR: /shared/tmp_kitchen
+
+  # bridge-bedroom:
+  #   <<: *bridge
+  #   command: ["--url", "ws://music-assistant:8927/sendspin", "--name", "Bedroom"]
+  #   environment:
+  #     <<: *bridge-env
+  #     INFERNO_DEVICE_ID: "0000000000000002"
+  #     TMPDIR: /shared/tmp_bedroom
