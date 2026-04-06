@@ -169,7 +169,11 @@ process start → Idle (device + TX alive, ring silent)
 - **Sendspin PCM 16-bit**: 2 bytes LE signed → cast to i32 → shift left 16
 - **Inferno `Sample`**: i32 with 24-bit value in upper 24 bits
 
-Lossless and bit-perfect for PCM. TX dithering disabled via `TX_SOURCE_BIT_DEPTH=24`.
+The bridge currently advertises and accepts PCM `16-bit` and `24-bit` Sendspin streams. Both are transported losslessly through Inferno's `Sample` representation.
+
+`TX_SOURCE_BIT_DEPTH` is intentionally fixed to `24`. This is not a statement that the bridge only supports 24-bit source audio; it reflects Inferno's 24-bit-oriented TX sample path and keeps TX dithering disabled for bit-perfect PCM transport.
+
+This is an implementation choice, not a fundamental architectural limit. Supporting wider PCM formats in the future would require explicit protocol, decode, and TX-path validation, but the bridge design itself is not inherently restricted to only `16-bit` and `24-bit` PCM.
 
 ## Multi-Stream Deployment
 
