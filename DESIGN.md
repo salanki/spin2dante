@@ -1,4 +1,4 @@
-# Sendspin-to-DANTE Bridge — Design Document
+# spin2dante — Design Document
 
 ## Context
 

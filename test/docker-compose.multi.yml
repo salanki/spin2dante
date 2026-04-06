@@ -87,22 +87,22 @@ services:
         condition: service_completed_successfully
 
   # --- 16 bridge instances ---
-  bridge-01: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b01 && exec sendspin_bridge --url ws://sendspin_source:8927/sendspin --name SS01 --buffer-ms 50"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b01, INFERNO_DEVICE_ID: "0000000000000101" } }
-  bridge-02: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b02 && exec sendspin_bridge --url ws://sendspin_source:8927/sendspin --name SS02 --buffer-ms 50"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b02, INFERNO_DEVICE_ID: "0000000000000102" } }
-  bridge-03: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b03 && exec sendspin_bridge --url ws://sendspin_source:8927/sendspin --name SS03 --buffer-ms 50"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b03, INFERNO_DEVICE_ID: "0000000000000103" } }
-  bridge-04: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b04 && exec sendspin_bridge --url ws://sendspin_source:8927/sendspin --name SS04 --buffer-ms 50"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b04, INFERNO_DEVICE_ID: "0000000000000104" } }
-  bridge-05: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b05 && exec sendspin_bridge --url ws://sendspin_source:8927/sendspin --name SS05 --buffer-ms 50"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b05, INFERNO_DEVICE_ID: "0000000000000105" } }
-  bridge-06: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b06 && exec sendspin_bridge --url ws://sendspin_source:8927/sendspin --name SS06 --buffer-ms 50"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b06, INFERNO_DEVICE_ID: "0000000000000106" } }
-  bridge-07: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b07 && exec sendspin_bridge --url ws://sendspin_source:8927/sendspin --name SS07 --buffer-ms 50"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b07, INFERNO_DEVICE_ID: "0000000000000107" } }
-  bridge-08: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b08 && exec sendspin_bridge --url ws://sendspin_source:8927/sendspin --name SS08 --buffer-ms 50"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b08, INFERNO_DEVICE_ID: "0000000000000108" } }
-  bridge-09: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b09 && exec sendspin_bridge --url ws://sendspin_source:8927/sendspin --name SS09 --buffer-ms 50"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b09, INFERNO_DEVICE_ID: "0000000000000109" } }
-  bridge-10: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b10 && exec sendspin_bridge --url ws://sendspin_source:8927/sendspin --name SS10 --buffer-ms 50"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b10, INFERNO_DEVICE_ID: "000000000000010a" } }
-  bridge-11: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b11 && exec sendspin_bridge --url ws://sendspin_source:8927/sendspin --name SS11 --buffer-ms 50"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b11, INFERNO_DEVICE_ID: "000000000000010b" } }
-  bridge-12: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b12 && exec sendspin_bridge --url ws://sendspin_source:8927/sendspin --name SS12 --buffer-ms 50"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b12, INFERNO_DEVICE_ID: "000000000000010c" } }
-  bridge-13: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b13 && exec sendspin_bridge --url ws://sendspin_source:8927/sendspin --name SS13 --buffer-ms 50"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b13, INFERNO_DEVICE_ID: "000000000000010d" } }
-  bridge-14: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b14 && exec sendspin_bridge --url ws://sendspin_source:8927/sendspin --name SS14 --buffer-ms 50"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b14, INFERNO_DEVICE_ID: "000000000000010e" } }
-  bridge-15: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b15 && exec sendspin_bridge --url ws://sendspin_source:8927/sendspin --name SS15 --buffer-ms 50"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b15, INFERNO_DEVICE_ID: "000000000000010f" } }
-  bridge-16: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b16 && exec sendspin_bridge --url ws://sendspin_source:8927/sendspin --name SS16 --buffer-ms 50"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b16, INFERNO_DEVICE_ID: "0000000000000110" } }
+  bridge-01: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b01 && exec spin2dante --url ws://sendspin_source:8927/sendspin --name SS01 --buffer-ms 50"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b01, INFERNO_DEVICE_ID: "0000000000000101" } }
+  bridge-02: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b02 && exec spin2dante --url ws://sendspin_source:8927/sendspin --name SS02 --buffer-ms 50"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b02, INFERNO_DEVICE_ID: "0000000000000102" } }
+  bridge-03: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b03 && exec spin2dante --url ws://sendspin_source:8927/sendspin --name SS03 --buffer-ms 50"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b03, INFERNO_DEVICE_ID: "0000000000000103" } }
+  bridge-04: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b04 && exec spin2dante --url ws://sendspin_source:8927/sendspin --name SS04 --buffer-ms 50"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b04, INFERNO_DEVICE_ID: "0000000000000104" } }
+  bridge-05: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b05 && exec spin2dante --url ws://sendspin_source:8927/sendspin --name SS05 --buffer-ms 50"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b05, INFERNO_DEVICE_ID: "0000000000000105" } }
+  bridge-06: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b06 && exec spin2dante --url ws://sendspin_source:8927/sendspin --name SS06 --buffer-ms 50"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b06, INFERNO_DEVICE_ID: "0000000000000106" } }
+  bridge-07: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b07 && exec spin2dante --url ws://sendspin_source:8927/sendspin --name SS07 --buffer-ms 50"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b07, INFERNO_DEVICE_ID: "0000000000000107" } }
+  bridge-08: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b08 && exec spin2dante --url ws://sendspin_source:8927/sendspin --name SS08 --buffer-ms 50"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b08, INFERNO_DEVICE_ID: "0000000000000108" } }
+  bridge-09: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b09 && exec spin2dante --url ws://sendspin_source:8927/sendspin --name SS09 --buffer-ms 50"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b09, INFERNO_DEVICE_ID: "0000000000000109" } }
+  bridge-10: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b10 && exec spin2dante --url ws://sendspin_source:8927/sendspin --name SS10 --buffer-ms 50"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b10, INFERNO_DEVICE_ID: "000000000000010a" } }
+  bridge-11: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b11 && exec spin2dante --url ws://sendspin_source:8927/sendspin --name SS11 --buffer-ms 50"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b11, INFERNO_DEVICE_ID: "000000000000010b" } }
+  bridge-12: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b12 && exec spin2dante --url ws://sendspin_source:8927/sendspin --name SS12 --buffer-ms 50"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b12, INFERNO_DEVICE_ID: "000000000000010c" } }
+  bridge-13: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b13 && exec spin2dante --url ws://sendspin_source:8927/sendspin --name SS13 --buffer-ms 50"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b13, INFERNO_DEVICE_ID: "000000000000010d" } }
+  bridge-14: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b14 && exec spin2dante --url ws://sendspin_source:8927/sendspin --name SS14 --buffer-ms 50"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b14, INFERNO_DEVICE_ID: "000000000000010e" } }
+  bridge-15: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b15 && exec spin2dante --url ws://sendspin_source:8927/sendspin --name SS15 --buffer-ms 50"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b15, INFERNO_DEVICE_ID: "000000000000010f" } }
+  bridge-16: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b16 && exec spin2dante --url ws://sendspin_source:8927/sendspin --name SS16 --buffer-ms 50"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b16, INFERNO_DEVICE_ID: "0000000000000110" } }
 
   # --- 16 i2pipe receivers ---
   i2pipe-01: { <<: *i2pipe-common, command: ["mkdir -p /shared/tmp_r01 && sleep 5 && inferno2pipe -c 2 -o /shared/capture_01.raw"], environment: { <<: *i2pipe-env, TMPDIR: /shared/tmp_r01, INFERNO_NAME: rx01, INFERNO_DEVICE_ID: "0000000000000201" }, depends_on: { clock_source: { condition: service_started }, bridge-01: { condition: service_started } } }
@@ -132,6 +132,34 @@ services:
       - audio_net
     depends_on:
       bridge-01: { condition: service_started }
+      bridge-02: { condition: service_started }
+      bridge-03: { condition: service_started }
+      bridge-04: { condition: service_started }
+      bridge-05: { condition: service_started }
+      bridge-06: { condition: service_started }
+      bridge-07: { condition: service_started }
+      bridge-08: { condition: service_started }
+      bridge-09: { condition: service_started }
+      bridge-10: { condition: service_started }
+      bridge-11: { condition: service_started }
+      bridge-12: { condition: service_started }
+      bridge-13: { condition: service_started }
+      bridge-14: { condition: service_started }
+      bridge-15: { condition: service_started }
       bridge-16: { condition: service_started }
       i2pipe-01: { condition: service_started }
+      i2pipe-02: { condition: service_started }
+      i2pipe-03: { condition: service_started }
+      i2pipe-04: { condition: service_started }
+      i2pipe-05: { condition: service_started }
+      i2pipe-06: { condition: service_started }
+      i2pipe-07: { condition: service_started }
+      i2pipe-08: { condition: service_started }
+      i2pipe-09: { condition: service_started }
+      i2pipe-10: { condition: service_started }
+      i2pipe-11: { condition: service_started }
+      i2pipe-12: { condition: service_started }
+      i2pipe-13: { condition: service_started }
+      i2pipe-14: { condition: service_started }
+      i2pipe-15: { condition: service_started }
       i2pipe-16: { condition: service_started }

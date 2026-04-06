@@ -4,7 +4,7 @@ INFERNO_DIR ?= ../inferno
 
 ## Build the bridge Docker image
 build:
-	docker build -t sendspin-bridge .
+	docker build -t spin2dante .
 
 ## Build the inferno2pipe image (required once before tests)
 inferno2pipe:

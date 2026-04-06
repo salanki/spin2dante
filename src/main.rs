@@ -4,7 +4,7 @@ use log::info;
 mod bridge;
 mod metrics;
 
-const ABOUT: &str = "Sendspin-to-DANTE Bridge
+const ABOUT: &str = "spin2dante
 Copyright (C) 2025
 
 Bridges Sendspin audio streams (e.g., from Music Assistant) to DANTE
@@ -42,7 +42,7 @@ async fn main() {
     let args = Args::parse();
 
     info!(
-        "sendspin_bridge starting: url={} name={} buffer={}ms",
+        "spin2dante starting: url={} name={} buffer={}ms",
         args.url, args.name, args.buffer_ms
     );
 

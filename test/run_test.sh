@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-echo "=== Building and running Sendspin Bridge E2E test ==="
+echo "=== Building and running spin2dante E2E test ==="
 echo ""
 
 cd "$(dirname "$0")"
