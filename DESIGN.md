@@ -34,86 +34,97 @@ Sendspin Server (Music Assistant)
    DANTE Receivers
 ```
 
-The bridge uses a fork of inferno_aoip that adds `transmit_from_owned_buffer()` — a method that creates owned ring buffers with proper `readable_pos` tracking and returns `RBInput` write handles to the caller.
+The bridge uses a fork of inferno_aoip (pinned to commit `71a3455`) that adds `transmit_from_owned_buffer()` and `ReadPositionSnapshot`.
 
-## Two-Layer Sync Architecture
+## Two-Stage Queue
 
-The bridge uses two independent sync mechanisms:
+Audio flows through two stages before reaching the DANTE network:
 
-1. **PTP/DANTE layer**: determines WHERE in the ring buffer audio lands (PTP-domain positions)
-2. **Sendspin timestamp layer**: determines WHICH audio chunk corresponds to "now" (cross-bridge convergence)
+1. **Pending queue** (`VecDeque<PendingChunk>`): Holds decoded PCM chunks keyed by server timestamp. Absorbs Sendspin's ahead-of-time buffering. Bounded by `MAX_PENDING_CHUNKS` (200).
 
-### Sendspin Timestamp Sync
+2. **Dante ring buffer** (`RBInput`, 16384 samples / ~341ms): Final local playout queue. FlowsTransmitter reads from here at PTP-synchronized timestamps.
 
-Each `AudioChunk` carries a presentation timestamp (`timestamp: i64`, server clock microseconds — "when the first sample should be output"). When `ClockSync` is synchronized, the bridge maps each chunk to a specific ring buffer position:
+The pending queue decouples chunk arrival from ring placement. Chunks are drained to the ring when their server-time target falls within the ring's writable horizon.
+
+### Buffer capacity
+
+The bridge advertises a small `buffer_capacity` (~500ms of stereo 24-bit PCM) via the Sendspin `PlayerV1Support` handshake, so the server doesn't send audio too far ahead of real-time.
+
+## Cross-Bridge Sync Architecture
+
+### Goal
+
+Multiple bridges connected to the same Sendspin server, sharing the same PTP clock, should place the same audio chunk at the same ring position. Target: < 1ms (48 samples) cross-bridge spread. Achieved: **< 0.5ms** (1-16 samples).
+
+### How it works
+
+Each bridge establishes a **stable anchor** mapping Sendspin server time to a ring position:
 
 ```
-anchor_ring_pos = read_position + prebuffer_target
+anchor_server_us = server_time_at_snapshot
+anchor_ring_pos  = read_pos_at_snapshot + prebuffer_target
+```
+
+All subsequent chunk targets are computed relative to this anchor:
+
+```
 target = anchor_ring_pos + (chunk.timestamp - anchor_server_us) * SAMPLE_RATE / 1_000_000
 ```
 
-This ensures all bridges receiving the same Sendspin stream write the same audio at the same ring positions (same Sendspin timestamps → same delta → same target). Cross-bridge sync target: < 1ms (< 48 samples).
+This gives stable chunk-to-chunk spacing (unaffected by wall-clock jitter) and cross-bridge consistency (all bridges using the same anchor mapping place the same chunk at the same position).
 
-**Chunk decisions** (ring position is the truth):
+### ReadPositionSnapshot (the key to sub-millisecond sync)
+
+The critical insight: sampling `read_pos` and `server_now_us()` separately introduces a timing gap that causes cross-bridge anchor offset. With separate sampling, bridges that anchor at different wall-clock times get different mappings.
+
+The inferno fork provides a `ReadPositionSnapshot` — a seqlock-protected `(read_position, monotonic_nanos)` pair written by the TX thread at the exact moment it updates `read_position`. The bridge reads this consistent pair and converts the monotonic timestamp to server time via ClockSync:
+
+```
+(snap_read_pos, snap_instant) = snapshot  // consistent pair from TX thread
+snap_server_us = ClockSync(snap_instant)  // convert to Sendspin server time
+anchor = (snap_server_us, snap_read_pos + prebuffer)
+```
+
+Since PTP time and server time both advance at 48kHz, the dt cancels:
+```
+Bridge A at time T:  anchor = (S, R + prebuffer)
+Bridge B at time T+dt: anchor = (S + dt*1M, R + dt*48000 + prebuffer)
+
+For chunk C:
+  target_A = R + prebuffer + (C - S) * 48/1000
+  target_B = R + dt*48000 + prebuffer + (C - S - dt*1M) * 48/1000
+           = R + dt*48000 + prebuffer + (C-S)*48/1000 - dt*48000
+           = target_A  ✓
+```
+
+The sync_key metric (`ring_pos - server_us * rate / 1M`) confirms this — it differs by only 1-16 samples across bridges.
+
+### Chunk eligibility decisions
+
 - `target + frames ≤ read_pos` → drop (entirely consumed)
 - `target < read_pos < target + frames` → trim stale prefix, write remainder
-- `target far ahead of write frontier` → re-anchor (intentional discontinuity)
+- `target far ahead of write frontier` → scheduler activation (first chunk) or discontinuity (settled)
+- `target behind write_pos by more than one chunk` → rebuffer (broken scheduler state)
 - Otherwise → write at target
 
-**Fallback**: if `ClockSync` hasn't converged yet (e.g., early in the session before time sync completes), the bridge writes sequentially at `write_pos`. Once sync converges, the anchor is set and timestamp-driven positioning activates automatically. The `sendspin serve` CLI and Music Assistant both support time sync.
+### Sequential fallback
+
+Before the PTP clock is available (`read_pos = 0`), the bridge writes chunks sequentially at `write_pos`. Once `read_pos` becomes valid and ClockSync converges, the anchor is established and timestamp-driven positioning activates.
 
 ## PTP Clock Model
 
-### Overview
-
-The bridge sends `start_time = 0` to inferno immediately. This means:
-
-```
-timestamp_shift = -0 - latency = -latency
-TX read position = next_ts + timestamp_shift = next_ts - latency
-```
-
-The FlowsTransmitter reads from the ring buffer at PTP-domain positions. The bridge writes at monotonically increasing positions starting from 0. With owned buffers, inferno only reads data that has been marked as readable via `write_from_at()`.
-
-### Current limitation: write/read domain alignment
-
-The bridge writes at positions in its own domain (0, 1, 2, ...) while the FlowsTransmitter reads at PTP-domain positions (`next_ts - latency`). These domains don't align:
-
-- Our `write_pos` starts at 0 and increments monotonically
-- Inferno's `start_ts` (read position) is `next_ts + timestamp_shift`, where `next_ts` is a PTP timestamp
-
-With owned buffers (`unconditional_read = false`), inferno checks `readable_pos` before reading. If the transmitter's `start_ts` is outside the range we've written, it reads zeros. The inferno fork now exposes that true consumer read position so the bridge can align writes to the actual PTP-domain read cursor instead of guessing from an approximation.
+The bridge sends `start_time = 0` to inferno. FlowsTransmitter reads from ring positions in the PTP domain. The bridge detects the domain mismatch (write_pos near 0 vs read_pos near ~140 billion) and calls `snap_to_live()` to realign.
 
 ### Read position tracking
 
-The inferno fork exposes the actual TX-side consumer cursor by publishing `start_ts` from the FlowsTransmitter. The bridge uses that true read position for:
-
+The inferno fork exposes `read_position` (the actual `start_ts` from FlowsTransmitter) and `ReadPositionSnapshot` for:
 - `snap_to_live()`: aligning `write_pos` to where inferno will actually read next
-- `WaitingForSubscriber`: detecting when the FlowsTransmitter has started consuming
+- Anchor creation: consistent `(read_pos, time)` pair for cross-bridge sync
 - Buffer fill estimation against the real consumer cursor
 
 ## Device Lifetime
 
-The DANTE device (DeviceServer + TX) is started **once at process startup** and stays alive for the entire process lifetime. This matches standard DANTE behavior where devices are persistent network entities.
-
-### Startup sequence
-
-1. `DeviceServer::start()` — creates DANTE device, blocks until PTP clock available
-2. `transmit_from_owned_buffer()` — creates owned ring buffers, returns RBInput handles
-3. `start_tx.send(0)` — starts FlowsTransmitter (idle, transmitting silence/zeros)
-4. Bridge enters **Idle** state — device visible on network
-5. Connect to Sendspin server (retry loop)
-6. On StreamStart → enter **WaitingForSubscriber**
-
-### WaitingForSubscriber and timeout fallback
-
-When a stream starts, the bridge writes audio via `RBInput::write_from_at()`. It monitors `read_position` (the true consumer cursor from the FlowsTransmitter) to detect when reading begins:
-
-- If `read_position` becomes valid (non-zero, non-MAX) → snap_to_live()
-- If write/read domain misalignment detected (distance > ring buffer size) → snap_to_live() immediately
-- If no change within 5 seconds → fall back to Prebuffering without alignment
-
-The auto-realignment handles PTP clock warmup: the bridge starts writing at local domain 0, then snaps to the PTP domain once `read_position` shows where inferno is actually reading.
+The DANTE device (DeviceServer + TX) starts once at process startup and stays alive for the entire process lifetime. The device is visible on the DANTE network regardless of stream state.
 
 ## State Machine
 
@@ -131,11 +142,9 @@ process start → Idle (device + TX alive, ring silent)
                   └────── Idle ←──────────┘
 ```
 
-All states have the DANTE device + TX alive. The difference is what audio is in the ring:
-
 - **Idle**: Ring filled with silence. No stale audio can leak.
-- **WaitingForSubscriber**: Discardable scratch audio in ring, waiting for TX to start.
-- **Prebuffering**: Fresh audio accumulating after snap_to_live (or timeout fallback).
+- **WaitingForSubscriber**: Waiting for DANTE subscriber (5s timeout to Prebuffering).
+- **Prebuffering**: Fresh audio accumulating after snap_to_live.
 - **Running**: Live audio being written and transmitted.
 - **Rebuffering**: Zero-fill + fresh audio after seek/clear.
 
@@ -143,122 +152,55 @@ All states have the DANTE device + TX alive. The difference is what audio is in 
 
 - **StreamStart**: Enter WaitingForSubscriber (or snap_to_live if TX already active)
 - **StreamStart (same format, already Running)**: Clear stale audio, enter Rebuffering
-- **StreamClear**: Zero-fill from approximate read_pos, jump write_pos ahead, enter Rebuffering
-- **StreamEnd**: Fill ring with silence, reset stream state, enter Idle (device stays on network)
-- **Sendspin disconnect**: Same as StreamEnd — silence ring, enter Idle, reconnect
+- **StreamClear**: Zero-fill, enter Rebuffering
+- **StreamEnd**: Fill ring with silence, enter Idle (device stays on network)
+- **Sendspin disconnect**: Silence ring, enter Idle, reconnect after 2s
 
 ## Data Path
 
 1. Sendspin delivers `AudioChunk { data: Arc<[u8]> }` — raw PCM bytes over WebSocket
-2. Bridge parses bytes, deinterleaves (L/R), and shifts samples to inferno format
-3. Bridge writes per-channel via `RBInput::write_from_at(write_pos, samples_iter)`
+2. Bridge decodes, deinterleaves (L/R), shifts to inferno format → `PendingChunk`
+3. `drain_pending()` computes target from anchor, writes via `RBInput::write_from_at()`
 4. FlowsTransmitter reads via `RBOutput::read_at()` at PTP-synchronized timestamps
 
 ## Sample Format Alignment
 
-- **Sendspin PCM**: 24-bit little-endian signed integers (3 bytes per sample, interleaved)
-- **Inferno `Sample`**: i32 with 24-bit value in **upper 24 bits**
-- **Conversion**: Parse 24-bit LE → sign-extend to i32 → shift left by 8
+- **Sendspin PCM 24-bit**: 3 bytes LE signed → sign-extend to i32 → shift left 8
+- **Sendspin PCM 16-bit**: 2 bytes LE signed → cast to i32 → shift left 16
+- **Inferno `Sample`**: i32 with 24-bit value in upper 24 bits
 
-```rust
-let raw = (b[0] as i32) | ((b[1] as i32) << 8) | ((b[2] as i32) << 16);
-let sign_extended = (raw << 8) >> 8;
-let inferno_sample = sign_extended << 8;
-```
-
-Lossless and bit-perfect for PCM.
-
-## Jitter Buffer Monitoring
-
-The bridge computes buffer fill from `write_pos - read_position`, where `read_position` is the true consumer cursor from the FlowsTransmitter (exposed via the inferno fork). When `read_position` is valid:
-
-```
-[buffer] fill=4128 target=2400 drift=+133.3ppm write_pos=140477176352 read_pos=140477172224
-```
-
-When `read_position` is not yet available (PTP clock warming up):
-```
-[buffer] writing at N samples (read_pos not yet available)
-```
-
-## PTP Clock Chain
-
-```
-DANTE devices ←PTP→ Statime (PTPv2 follower)
-                        │
-                        │ usrvclock (Unix datagram socket)
-                        ▼
-                  inferno AsyncClient (tokio task)
-                        │
-                        │ watch channel → RealTimeBoxReceiver
-                        ▼
-                  FlowsTransmitter (real-time thread)
-```
-
-**Only PTP followers export usrvclock overlays.** A PTP master doesn't adjust its clock, so the overlay export callback never fires. For Docker-only testing, use a PTPv2 master + follower pair. For production with DANTE hardware, Statime runs as PTPv1 follower syncing to the DANTE PTP master.
-
-## Format Enforcement
-
-The bridge rejects streams at StreamStart that don't match:
-- Sample rate must be 48000 Hz
-- Channel count must be 2 (stereo)
-- Codec must be "pcm"
-- Bit depth must be 16 or 24
-
-## Reconnection
-
-The bridge has an outer reconnect loop. If the WebSocket drops, it fills the ring with silence, enters Idle, waits 2 seconds, and reconnects. The DANTE device stays on the network — only the stream state resets.
-
-## Codec Support
-
-| Codec | Status | Notes |
-|-------|--------|-------|
-| PCM   | Supported, bit-perfect | 16-bit and 24-bit LE |
-| FLAC  | Not yet supported | sendspin-rs v0.1 only has PCM decoder |
-| Opus  | Not supported | Lossy codec |
-| MP3   | Not supported | Lossy codec |
+Lossless and bit-perfect for PCM. TX dithering disabled via `TX_SOURCE_BIT_DEPTH=24`.
 
 ## Multi-Stream Deployment
 
-One bridge process per Sendspin stream. Each bridge needs unique `INFERNO_PROCESS_ID` and `INFERNO_ALT_PORT`. Device ID is auto-derived from host IP + process ID.
+One bridge process per Sendspin stream. Each bridge needs unique `INFERNO_PROCESS_ID` and `INFERNO_ALT_PORT` (or unique `INFERNO_DEVICE_ID` in Docker bridge networks).
 
 ## Inferno Fork
 
-This project uses a [fork of inferno_aoip](https://github.com/salanki/inferno/tree/spin2dante-owned-buffer) that adds:
+[`github.com/salanki/inferno`](https://github.com/salanki/inferno/tree/spin2dante-owned-buffer), pinned to commit `71a3455`:
 
-- `transmit_from_owned_buffer()` — creates owned ring buffers and returns `RBInput` write handles
-- Re-exports: `OwnedBuffer`, `RBInput`, `RBOutput`, `new_owned_ring_buffer`
-
-The owned buffer path provides:
-- `readable_pos` tracking on the write side (inferno only reads validated data)
-- `unconditional_read() == false` (reads check readable_pos)
-- Hole detection and fill via `hole_fix_wait`
-- Configurable TX dithering via `TX_SOURCE_BIT_DEPTH`, with spin2dante setting it to `24` so 24-bit TX preserves PCM payloads bit-for-bit over the received overlap
-
-The fork exposes `read_position` — the actual `start_ts` the FlowsTransmitter uses for ring reads. The bridge uses this for snap_to_live alignment and buffer metrics.
+- `transmit_from_owned_buffer()` — creates owned ring buffers, returns `RBInput` handles
+- `ReadPositionSnapshot` — seqlock `(read_pos, monotonic_nanos, ref_instant)` for precise timing
+- `read_position: Arc<AtomicUsize>` — exposes TX consumer cursor
+- `TX_SOURCE_BIT_DEPTH` — controls dithering (set to 24 for bit-perfect PCM)
 
 ## Lessons Learned
 
-### Why "start at zero" instead of PTP-anchored start_time
+### Why the two-stage queue, not direct write
 
-Getting a PTP media clock time to send as `start_time` proved unreliable:
-1. `get_realtime_clock_receiver()` uses a `RealTimeBoxReceiver` that requires the sender to keep sending for the receiver to see updates
-2. `make_shared_media_clock()` returns immediately without waiting for the first overlay
-3. `current_timestamp` is only set after `start_time` is received (chicken-and-egg)
+Per-chunk live targeting (`target = read_pos + prebuffer + delta_from_server_now`) was attempted first. It caused chunk overlap because `server_now` advances between chunks within a drain cycle. The stable anchor approach — set once, compute all targets relative to it — preserves chunk spacing.
 
-Sending `start_time = 0` avoids all three issues. The tradeoff is that ring buffer positions are in our local domain (0, 1, 2...) rather than the PTP domain.
+### Why ReadPositionSnapshot for sync
+
+Sampling `read_pos` and `server_now_us()` separately introduces a timing gap (microseconds to milliseconds). This gap differs per bridge, causing 30-50ms of cross-bridge anchor offset. The seqlock snapshot from the TX thread eliminates this gap, reducing offset to 1-16 samples (< 0.5ms).
 
 ### TMPDIR must be on a shared volume
 
-The usrvclock protocol uses Unix datagram sockets. Client sockets are created in `$TMPDIR`. Docker containers have isolated filesystems even with host networking, so the socket files must be on a shared volume for Statime to reach them. Each bridge needs a unique TMPDIR subdirectory (PIDs overlap across containers).
-
-### DANTE device naming
-
-Inferno uses `friendly_hostname` from the `NAME` config key (our `--name` arg). Without it, the default is `"{app_name} {hex_ip}"`. The device ID is auto-derived from `IP + PROCESS_ID`.
+The usrvclock protocol uses Unix datagram sockets in `$TMPDIR`. Docker containers need these on a shared volume for Statime to reach them.
 
 ## Future Work
 
-- **Cross-correlation sync validation**: The multi-stream onset measurement (116ms spread) reflects PTP warmup variance, not sync failure. True < 1ms validation needs audio content cross-correlation between captures.
 - **FLAC support**: When sendspin-rs gains FLAC decoding
-- **Drift compensation**: Sample insertion/dropping when fill deviates from target
+- **Drift compensation**: Sample insertion/dropping if fill deviates from target over long sessions
 - **Prometheus metrics**: Production monitoring endpoint
+- **Ring buffer sizing**: Currently 16384 samples (~341ms). Could be further tuned based on production latency requirements.

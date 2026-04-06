@@ -1,14 +1,14 @@
+use std::collections::VecDeque;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
+
 use parking_lot::Mutex;
 
 use atomic::Atomic;
-use inferno_aoip::device_server::{
-    DeviceServer, OwnedBuffer, RBInput, Sample, Settings,
-};
+use inferno_aoip::device_server::{DeviceServer, OwnedBuffer, RBInput, ReadPositionSnapshot, Sample, Settings};
 use log::{debug, error, info, warn};
 use sendspin::protocol::client::AudioChunk;
-use sendspin::protocol::messages::Message;
+use sendspin::protocol::messages::{AudioFormatSpec, Message, PlayerV1Support};
 use sendspin::sync::clock::ClockSync;
 use sendspin::ProtocolClientBuilder;
 use tokio::sync::oneshot;
@@ -16,12 +16,12 @@ use tokio::sync::oneshot;
 use crate::metrics::BufferMetrics;
 
 pub const CHANNELS: usize = 2;
-pub const RING_BUFFER_SIZE: usize = 131072; // ~2.7s at 48kHz, power of 2
+pub const RING_BUFFER_SIZE: usize = 16384; // ~341ms at 48kHz, power of 2
 pub const SAMPLE_RATE: u32 = 48000;
 const METRICS_INTERVAL_SECS: u64 = 5;
 const HOLE_FIX_WAIT: usize = 4800; // ~100ms at 48kHz
+const MAX_PENDING_CHUNKS: usize = 200; // ~5s at 25 frames/chunk — bounds RAM usage
 
-/// Wrap-aware signed difference: (a - b) as isize with wrapping.
 fn wrapsub(a: usize, b: usize) -> isize {
     (a as isize).wrapping_sub(b as isize)
 }
@@ -47,6 +47,14 @@ struct StreamFormat {
     bit_depth: u8,
 }
 
+// ─── Pending chunk ──────────────────────────────────────────────────
+
+struct PendingChunk {
+    timestamp_us: i64,
+    frames: usize,
+    channel_samples: Vec<Vec<Sample>>,
+}
+
 // ─── Bridge ─────────────────────────────────────────────────────────
 
 pub struct SendspinBridge {
@@ -60,6 +68,7 @@ pub struct SendspinBridge {
     device_server: Option<DeviceServer>,
     current_timestamp: Arc<AtomicUsize>,
     read_position: Arc<AtomicUsize>,
+    read_position_snapshot: Arc<ReadPositionSnapshot>,
     // Stream state (reset per stream)
     write_pos: usize,
     prebuffer_target: usize,
@@ -68,11 +77,19 @@ pub struct SendspinBridge {
     metrics: BufferMetrics,
     last_read_pos: usize,
     waiting_since: Option<std::time::Instant>,
-    // Sendspin timestamp sync
+    // Two-stage queue: Sendspin pending → Dante ring
     clock_sync: Option<Arc<Mutex<ClockSync>>>,
+    pending_chunks: VecDeque<PendingChunk>,
+    // Server-now anchor: set once, maps server_time → ring_position.
+    // All targets computed relative to this anchor for stable spacing.
     anchor_server_us: Option<i64>,
     anchor_ring_pos: Option<usize>,
-    sync_active: bool,
+    // Scheduler counters
+    stale_drops: u64,
+    trimmed_chunks: u64,
+    trimmed_frames: u64,
+    queued_high_water: usize,
+    scheduler_settled: bool,
 }
 
 impl SendspinBridge {
@@ -88,6 +105,7 @@ impl SendspinBridge {
             device_server: None,
             current_timestamp: Arc::new(AtomicUsize::new(usize::MAX)),
             read_position: Arc::new(AtomicUsize::new(usize::MAX)),
+            read_position_snapshot: Arc::new(ReadPositionSnapshot::new()),
             write_pos: 0,
             prebuffer_target,
             prebuffer_written: 0,
@@ -96,9 +114,14 @@ impl SendspinBridge {
             last_read_pos: 0,
             waiting_since: None,
             clock_sync: None,
+            pending_chunks: VecDeque::new(),
             anchor_server_us: None,
             anchor_ring_pos: None,
-            sync_active: false,
+            stale_drops: 0,
+            trimmed_chunks: 0,
+            trimmed_frames: 0,
+            queued_high_water: 0,
+            scheduler_settled: false,
         }
     }
 
@@ -129,7 +152,10 @@ impl SendspinBridge {
         settings.make_tx_channels(CHANNELS);
         settings.make_rx_channels(0);
 
-        info!("starting DANTE device: {} (waiting for PTP clock...)", self.device_name);
+        info!(
+            "starting DANTE device: {} (waiting for PTP clock...)",
+            self.device_name
+        );
         let mut server = DeviceServer::start(settings).await;
         info!("DANTE device started, clock ready");
 
@@ -147,6 +173,7 @@ impl SendspinBridge {
                 start_rx,
                 self.current_timestamp.clone(),
                 self.read_position.clone(),
+                Some(self.read_position_snapshot.clone()),
                 None,
             )
             .await;
@@ -163,12 +190,34 @@ impl SendspinBridge {
     async fn run_session(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let client = loop {
             info!("connecting to Sendspin server at {}", self.url);
+            // Advertise a small buffer_capacity so the server doesn't send
+            // audio too far ahead of real-time. The pending queue + ring need
+            // the server lead to fit within RING_BUFFER_SIZE (~341ms).
+            let player_support = PlayerV1Support {
+                supported_formats: vec![
+                    AudioFormatSpec {
+                        codec: "pcm".to_string(),
+                        channels: CHANNELS as u8,
+                        sample_rate: SAMPLE_RATE,
+                        bit_depth: 24,
+                    },
+                    AudioFormatSpec {
+                        codec: "pcm".to_string(),
+                        channels: CHANNELS as u8,
+                        sample_rate: SAMPLE_RATE,
+                        bit_depth: 16,
+                    },
+                ],
+                buffer_capacity: (SAMPLE_RATE as u32 * CHANNELS as u32 * 3 / 2), // ~500ms stereo 24-bit
+                supported_commands: vec!["volume".to_string(), "mute".to_string()],
+            };
             match ProtocolClientBuilder::builder()
                 .client_id(self.client_id.clone())
                 .name(self.device_name.clone())
                 .product_name(Some("spin2dante".to_string()))
                 .manufacturer(Some("spin2dante".to_string()))
                 .software_version(Some(env!("CARGO_PKG_VERSION").to_string()))
+                .player_v1_support(player_support)
                 .build()
                 .connect(&self.url)
                 .await
@@ -230,19 +279,31 @@ impl SendspinBridge {
                     );
 
                     if format.sample_rate != SAMPLE_RATE {
-                        error!("rejecting stream: sample rate {}Hz, requires {}Hz", format.sample_rate, SAMPLE_RATE);
+                        error!(
+                            "rejecting stream: sample rate {}Hz, requires {}Hz",
+                            format.sample_rate, SAMPLE_RATE
+                        );
                         return;
                     }
                     if format.channels != CHANNELS as u8 {
-                        error!("rejecting stream: {} channels, requires {} (stereo)", format.channels, CHANNELS);
+                        error!(
+                            "rejecting stream: {} channels, requires {} (stereo)",
+                            format.channels, CHANNELS
+                        );
                         return;
                     }
                     if format.codec != "pcm" {
-                        error!("rejecting stream: codec '{}', only 'pcm' supported", format.codec);
+                        error!(
+                            "rejecting stream: codec '{}', only 'pcm' supported",
+                            format.codec
+                        );
                         return;
                     }
                     if format.bit_depth != 16 && format.bit_depth != 24 {
-                        error!("rejecting stream: PCM bit depth {}, only 16 or 24 supported", format.bit_depth);
+                        error!(
+                            "rejecting stream: PCM bit depth {}, only 16 or 24 supported",
+                            format.bit_depth
+                        );
                         return;
                     }
 
@@ -255,11 +316,14 @@ impl SendspinBridge {
                     }
 
                     self.stream_format = Some(format);
-                    self.reset_sync();
+                    self.reset_scheduler();
 
                     let read_pos = self.get_read_pos();
                     if read_pos != 0 && read_pos != self.last_read_pos {
-                        info!("subscriber already active (read_pos={}), snapping to live", read_pos);
+                        info!(
+                            "subscriber already active (read_pos={}), snapping to live",
+                            read_pos
+                        );
                         self.snap_to_live();
                     } else {
                         self.state = BridgeState::WaitingForSubscriber;
@@ -284,50 +348,81 @@ impl SendspinBridge {
         }
     }
 
+    // ─── Helpers ────────────────────────────────────────────────────
+
     fn get_read_pos(&self) -> usize {
-        let pos = self.read_position.load(std::sync::atomic::Ordering::Relaxed);
-        if pos == usize::MAX { 0 } else { pos }
+        let pos = self
+            .read_position
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if pos == usize::MAX {
+            0
+        } else {
+            pos
+        }
     }
 
-    fn reset_sync(&mut self) {
+    /// Get current server time in microseconds via ClockSync.
+    fn server_now_us(&self) -> Option<i64> {
+        let cs = self.clock_sync.as_ref()?;
+        let sync = cs.lock();
+        if !sync.is_synchronized() {
+            return None;
+        }
+        let now_us = sync.instant_to_client_micros(std::time::Instant::now())?;
+        sync.client_to_server_micros(now_us)
+    }
+
+    /// Read a consistent (read_pos, Instant) pair from the TX thread's seqlock snapshot.
+    /// Returns None if the snapshot hasn't been written yet or if a write is in progress.
+    fn get_read_pos_snapshot(&self) -> Option<(usize, std::time::Instant)> {
+        let snap = &self.read_position_snapshot;
+        let ref_instant = (*snap.ref_instant.lock().unwrap())?;
+        for _ in 0..8 {
+            let seq1 = snap.seq.load(std::sync::atomic::Ordering::Acquire);
+            if seq1 & 1 != 0 {
+                continue; // writer active
+            }
+            let pos = snap.read_position.load(std::sync::atomic::Ordering::Relaxed);
+            let nanos = snap.monotonic_nanos.load(std::sync::atomic::Ordering::Relaxed);
+            let seq2 = snap.seq.load(std::sync::atomic::Ordering::Acquire);
+            if seq1 == seq2 {
+                if pos == usize::MAX {
+                    return None;
+                }
+                let instant = ref_instant + std::time::Duration::from_nanos(nanos);
+                return Some((pos, instant));
+            }
+        }
+        None
+    }
+
+    /// Get a consistent (read_pos, server_now_us) pair by reading the TX snapshot
+    /// and converting the snapshot's monotonic instant to server time via ClockSync.
+    /// This eliminates the timing gap between sampling read_pos and server_now separately.
+    fn get_synced_pair(&self) -> Option<(usize, i64)> {
+        let (read_pos, snapshot_instant) = self.get_read_pos_snapshot()?;
+        let cs = self.clock_sync.as_ref()?;
+        let sync = cs.lock();
+        if !sync.is_synchronized() {
+            return None;
+        }
+        let client_us = sync.instant_to_client_micros(snapshot_instant)?;
+        let server_us = sync.client_to_server_micros(client_us)?;
+        Some((read_pos, server_us))
+    }
+
+    fn reset_scheduler(&mut self) {
+        self.pending_chunks.clear();
         self.anchor_server_us = None;
         self.anchor_ring_pos = None;
-        self.sync_active = false;
+        self.stale_drops = 0;
+        self.trimmed_chunks = 0;
+        self.trimmed_frames = 0;
+        self.queued_high_water = 0;
+        self.scheduler_settled = false;
     }
 
-    fn is_clock_synced(&self) -> bool {
-        self.clock_sync
-            .as_ref()
-            .map_or(false, |cs| cs.lock().is_synchronized())
-    }
-
-    /// Try to establish the anchor: maps a Sendspin timestamp to a ring position.
-    /// Called on the first chunk after clock_sync becomes valid AND read_pos is available.
-    fn try_set_anchor(&mut self, chunk_timestamp: i64) {
-        let read_pos = self.get_read_pos();
-        if read_pos == 0 {
-            return; // read_pos not yet available
-        }
-        self.anchor_server_us = Some(chunk_timestamp);
-        self.anchor_ring_pos = Some(read_pos.wrapping_add(self.prebuffer_target));
-        self.sync_active = true;
-        self.write_pos = self.anchor_ring_pos.unwrap();
-        info!(
-            "sync anchored: server_us={}, ring_pos={}, read_pos={}",
-            chunk_timestamp,
-            self.anchor_ring_pos.unwrap(),
-            read_pos,
-        );
-    }
-
-    /// Compute the target ring position for a chunk based on its Sendspin timestamp.
-    fn compute_target(&self, chunk_timestamp: i64) -> Option<usize> {
-        let anchor_us = self.anchor_server_us?;
-        let anchor_pos = self.anchor_ring_pos?;
-        let delta_us = chunk_timestamp - anchor_us;
-        let delta_samples = (delta_us * SAMPLE_RATE as i64 / 1_000_000) as isize;
-        Some(anchor_pos.wrapping_add_signed(delta_samples))
-    }
+    // ─── State transitions ──────────────────────────────────────────
 
     fn enter_idle(&mut self) {
         if let Some(inputs) = &mut self.rb_inputs {
@@ -342,7 +437,7 @@ impl SendspinBridge {
         self.stream_format = None;
         self.prebuffer_written = 0;
         self.last_read_pos = 0;
-        self.reset_sync();
+        self.reset_scheduler();
         self.state = BridgeState::Idle;
         self.metrics.reset();
     }
@@ -356,11 +451,17 @@ impl SendspinBridge {
             }
         }
         self.write_pos = read_pos.wrapping_add(self.prebuffer_target);
-        info!("snapped to live: read_pos={}, write_pos={}", read_pos, self.write_pos);
+        info!(
+            "snapped to live: read_pos={}, write_pos={}",
+            read_pos, self.write_pos
+        );
         self.prebuffer_written = 0;
         self.state = BridgeState::Prebuffering;
         self.metrics.reset();
-        info!("prebuffering {}ms ({} samples)", self.buffer_ms, self.prebuffer_target);
+        info!(
+            "prebuffering {}ms ({} samples)",
+            self.buffer_ms, self.prebuffer_target
+        );
     }
 
     fn clear_and_rebuffer(&mut self) {
@@ -372,12 +473,17 @@ impl SendspinBridge {
             }
         }
         self.write_pos = read_pos.wrapping_add(self.prebuffer_target);
-        info!("cleared stale audio, entering Rebuffering (read_pos={}, write_pos={})", read_pos, self.write_pos);
+        info!(
+            "cleared stale audio, entering Rebuffering (read_pos={}, write_pos={})",
+            read_pos, self.write_pos
+        );
         self.prebuffer_written = 0;
-        self.reset_sync();
+        self.reset_scheduler();
         self.state = BridgeState::Rebuffering;
         self.metrics.reset();
     }
+
+    // ─── Audio handling: enqueue + drain ─────────────────────────────
 
     fn handle_audio(&mut self, chunk: AudioChunk) {
         let format = match &self.stream_format {
@@ -406,90 +512,223 @@ impl SendspinBridge {
             };
             if distance > RING_BUFFER_SIZE {
                 info!(
-                    "write/read misalignment detected (write_pos={}, read_pos={}, distance={}), snapping to live",
+                    "write/read misalignment (write={}, read={}, dist={}), snapping",
                     self.write_pos, read_pos, distance
                 );
                 self.snap_to_live();
-                // Re-anchor sync since we just moved
-                self.reset_sync();
+                self.reset_scheduler();
             }
         }
 
-        // ── Sendspin timestamp sync ──
-        if !self.sync_active {
-            // Try to activate sync
-            if self.is_clock_synced() && read_pos != 0 {
-                self.try_set_anchor(chunk.timestamp);
-            }
+        // Enqueue the chunk (bounded: drop oldest if queue overflows)
+        self.pending_chunks.push_back(PendingChunk {
+            timestamp_us: chunk.timestamp,
+            frames,
+            channel_samples,
+        });
+        while self.pending_chunks.len() > MAX_PENDING_CHUNKS {
+            self.stale_drops += 1;
+            self.pending_chunks.pop_front();
+        }
+        if self.pending_chunks.len() > self.queued_high_water {
+            self.queued_high_water = self.pending_chunks.len();
         }
 
-        if self.sync_active {
-            if let Some(target) = self.compute_target(chunk.timestamp) {
-                let chunk_end = target.wrapping_add(frames);
-
-                // Case: entirely consumed (target + frames <= read_pos)
-                if wrapsub(chunk_end, read_pos) <= 0 {
-                    debug!("dropped stale chunk (target={}, chunk_end={}, read_pos={})", target, chunk_end, read_pos);
-                    return;
-                }
-
-                // Case: partially stale (target < read_pos < chunk_end)
-                if wrapsub(target, read_pos) < 0 && wrapsub(chunk_end, read_pos) > 0 {
-                    let trim = read_pos.wrapping_sub(target);
-                    let remaining = frames - trim;
-                    info!("trimming {} stale samples from chunk, writing {} at read_pos={}", trim, remaining, read_pos);
-                    self.write_trimmed_samples(&channel_samples, trim, remaining, read_pos);
-                    if wrapsub(chunk_end, self.write_pos) > 0 {
-                        self.write_pos = chunk_end;
-                    }
-                    self.update_state_after_write(remaining, read_pos);
-                    return;
-                }
-
-                // Case: large forward skip (target far ahead of write frontier)
-                if wrapsub(target, self.write_pos) > (RING_BUFFER_SIZE / 2) as isize {
-                    info!("large forward skip detected (target={}, write_pos={}), re-anchoring", target, self.write_pos);
-                    self.snap_to_live();
-                    self.try_set_anchor(chunk.timestamp);
-                    return;
-                }
-
-                // Normal case: write at target
-                self.write_samples_at(&channel_samples, frames, target);
-                if wrapsub(chunk_end, self.write_pos) > 0 {
-                    self.write_pos = chunk_end;
-                }
-                self.update_state_after_write(frames, read_pos);
-                return;
-            }
-        }
-
-        // ── Fallback: write sequentially (no sync yet) ──
-        self.write_samples_at(&channel_samples, frames, self.write_pos);
-        self.write_pos = self.write_pos.wrapping_add(frames);
-
-        // WaitingForSubscriber timeout
+        // WaitingForSubscriber: handle subscriber detection before draining
+        // to avoid anchoring + writing chunks that snap_to_live will discard.
         if self.state == BridgeState::WaitingForSubscriber {
             if read_pos != self.last_read_pos && read_pos != 0 {
-                info!("subscriber detected (read_pos={}), snapping to live", read_pos);
+                info!(
+                    "subscriber detected (read_pos={}), snapping to live",
+                    read_pos
+                );
                 self.waiting_since = None;
                 self.snap_to_live();
-                self.reset_sync();
-            } else if self.waiting_since.map_or(false, |t| t.elapsed().as_secs() >= 5) {
-                info!("subscriber wait timed out (5s), entering prebuffering without alignment");
+                self.reset_scheduler();
+            } else if self
+                .waiting_since
+                .map_or(false, |t| t.elapsed().as_secs() >= 5)
+            {
+                info!("subscriber wait timed out, entering prebuffering");
                 self.waiting_since = None;
                 self.prebuffer_written = 0;
                 self.state = BridgeState::Prebuffering;
                 self.metrics.reset();
             }
             self.last_read_pos = read_pos;
+        }
+
+        // Drain eligible chunks to ring
+        self.drain_pending(read_pos);
+    }
+
+    // ─── Drain: move eligible chunks from pending queue to ring ──────
+
+    fn drain_pending(&mut self, read_pos: usize) {
+        // Before FlowsTransmitter has a PTP clock, read_pos is 0 and ring
+        // positions are meaningless — write sequentially to keep audio flowing.
+        if read_pos == 0 {
+            self.drain_sequential();
             return;
         }
 
-        self.update_state_after_write(frames, read_pos);
+        // Set anchor on first scheduled drain. Uses server_now_us() so that
+        // anchor_server_us is from the shared Sendspin timeline. anchor_ring_pos
+        // still depends on each bridge's local read_pos at anchor time, so
+        // cross-bridge sync accuracy depends on how close the anchor instants are.
+        if self.anchor_server_us.is_none() {
+            // Use the TX snapshot for a consistent (read_pos, server_time) pair.
+            // This eliminates the timing gap between sampling read_pos and server_now
+            // separately, which was the source of cross-bridge anchor offset.
+            match self.get_synced_pair() {
+                Some((snap_read_pos, snap_server_us)) => {
+                    let ring_pos = snap_read_pos.wrapping_add(self.prebuffer_target);
+                    self.anchor_server_us = Some(snap_server_us);
+                    self.anchor_ring_pos = Some(ring_pos);
+                    let sync_key = ring_pos.wrapping_sub(
+                        (snap_server_us as u128 * SAMPLE_RATE as u128 / 1_000_000) as usize,
+                    );
+                    info!(
+                        "scheduler anchored: server_us={}, ring_pos={}, snap_read_pos={}, read_pos={}, sync_key={}",
+                        snap_server_us, ring_pos, snap_read_pos, read_pos, sync_key,
+                    );
+                    // Write sync_key to shared volume for test harness
+                    if std::env::var("SPIN2DANTE_WRITE_SYNC_KEY").is_ok() {
+                        let _ = std::fs::write(
+                            format!("/shared/sync_key_{}.txt", self.device_name),
+                            format!("{}", sync_key),
+                        );
+                    }
+                }
+                None => {
+                    // Snapshot or ClockSync not ready yet — write sequentially
+                    self.drain_sequential();
+                    return;
+                }
+            }
+        }
+        // Once anchored, targets use only anchor fields + chunk timestamps.
+        // No need to check ClockSync availability — transient loss shouldn't stall audio.
+
+        let anchor_us = self.anchor_server_us.unwrap();
+        let anchor_pos = self.anchor_ring_pos.unwrap();
+
+        while let Some(chunk) = self.pending_chunks.front() {
+            // Target = anchor position + delta from anchor timestamp.
+            // This gives stable spacing: consecutive chunks are exactly
+            // their timestamp delta apart, unaffected by wall-clock jitter.
+            let delta_us = chunk.timestamp_us - anchor_us;
+            let delta_samples = (delta_us * SAMPLE_RATE as i64 / 1_000_000) as isize;
+            let target = anchor_pos.wrapping_add_signed(delta_samples);
+            let chunk_end = target.wrapping_add(chunk.frames);
+
+            // Too early: target beyond writable ring horizon
+            let distance_from_read = wrapsub(target, read_pos);
+            if distance_from_read > (RING_BUFFER_SIZE - chunk.frames) as isize {
+                break; // leave queued, try next drain
+            }
+
+            // Entirely stale: chunk_end behind read_pos
+            if wrapsub(chunk_end, read_pos) <= 0 {
+                self.stale_drops += 1;
+                debug!(
+                    "dropped stale chunk: ts={}, target={}, read_pos={}",
+                    chunk.timestamp_us, target, read_pos
+                );
+                self.pending_chunks.pop_front();
+                continue;
+            }
+
+            // Partial overlap: target behind read_pos but chunk_end ahead
+            if wrapsub(target, read_pos) < 0 && wrapsub(chunk_end, read_pos) > 0 {
+                let trim = read_pos.wrapping_sub(target);
+                let remaining = chunk.frames - trim;
+                self.trimmed_chunks += 1;
+                self.trimmed_frames += trim as u64;
+                info!(
+                    "trimming {} stale samples, writing {} at read_pos={}",
+                    trim, remaining, read_pos
+                );
+                let chunk = self.pending_chunks.pop_front().unwrap();
+                self.write_trimmed_samples(&chunk.channel_samples, trim, remaining, read_pos);
+                if wrapsub(chunk_end, self.write_pos) > 0 {
+                    self.write_pos = chunk_end;
+                }
+                self.update_state_after_write(remaining, read_pos);
+                continue;
+            }
+
+            // Large gap handling
+            if wrapsub(target, self.write_pos) > (RING_BUFFER_SIZE / 2) as isize {
+                if !self.scheduler_settled {
+                    // Scheduler activation: first chunks land far ahead of write_pos.
+                    // The gap is just silence from snap_to_live — advance past it.
+                    info!(
+                        "scheduler activation: advancing write_pos {} -> {} (gap={} samples)",
+                        self.write_pos,
+                        target,
+                        wrapsub(target, self.write_pos),
+                    );
+                    self.write_pos = target;
+                    self.scheduler_settled = true;
+                } else {
+                    // Settled scheduler: real discontinuity
+                    info!(
+                        "discontinuity (target={}, write_pos={}, settled={}), snapping",
+                        target, self.write_pos, self.scheduler_settled
+                    );
+                    self.snap_to_live();
+                    self.reset_scheduler();
+                    break;
+                }
+            }
+
+            // Backward write handling: target behind write_pos
+            let backward = wrapsub(self.write_pos, target);
+            if backward > chunk.frames as isize {
+                // Significant backward overwrite — treat as discontinuity.
+                // clear_and_rebuffer() calls reset_scheduler() which discards the
+                // entire pending queue, not just this chunk. This is intentional:
+                // a large backward target implies broken scheduler state, so all
+                // queued positions are suspect.
+                warn!(
+                    "significant backward target: target={} behind write_pos={} by {} samples, rebuffering (dropping {} queued chunks)",
+                    target, self.write_pos, backward, self.pending_chunks.len()
+                );
+                self.clear_and_rebuffer();
+                break;
+            } else if backward > 0 {
+                debug!(
+                    "backward jitter: target={} behind write_pos={} by {} samples",
+                    target, self.write_pos, backward
+                );
+            }
+
+            // Normal: write chunk at target
+            let chunk = self.pending_chunks.pop_front().unwrap();
+            self.write_samples_at(&chunk.channel_samples, chunk.frames, target);
+            if wrapsub(chunk_end, self.write_pos) > 0 {
+                self.write_pos = chunk_end;
+            }
+            self.update_state_after_write(chunk.frames, read_pos);
+            if !self.scheduler_settled {
+                self.scheduler_settled = true;
+            }
+        }
     }
 
-    /// Decode PCM chunk into per-channel sample vectors.
+    /// Fallback: write pending chunks sequentially (clock sync not ready or read_pos=0).
+    fn drain_sequential(&mut self) {
+        let read_pos = self.get_read_pos();
+        while let Some(chunk) = self.pending_chunks.pop_front() {
+            self.write_samples_at(&chunk.channel_samples, chunk.frames, self.write_pos);
+            self.write_pos = self.write_pos.wrapping_add(chunk.frames);
+            self.update_state_after_write(chunk.frames, read_pos);
+        }
+    }
+
+    // ─── PCM decode ─────────────────────────────────────────────────
+
     fn decode_pcm(&self, data: &[u8], format: &StreamFormat) -> (usize, Vec<Vec<Sample>>) {
         let (bytes_per_sample, frames) = match format.bit_depth {
             24 => (3, data.len() / (3 * CHANNELS)),
@@ -520,7 +759,8 @@ impl SendspinBridge {
         (frames, channels)
     }
 
-    /// Write all decoded samples at a specific ring position.
+    // ─── Ring buffer writes ─────────────────────────────────────────
+
     fn write_samples_at(&mut self, channel_samples: &[Vec<Sample>], _frames: usize, pos: usize) {
         if let Some(inputs) = &mut self.rb_inputs {
             for (ch, samples) in channel_samples.iter().enumerate() {
@@ -529,8 +769,13 @@ impl SendspinBridge {
         }
     }
 
-    /// Write trimmed samples (skipping first `trim` samples) at a specific position.
-    fn write_trimmed_samples(&mut self, channel_samples: &[Vec<Sample>], trim: usize, remaining: usize, pos: usize) {
+    fn write_trimmed_samples(
+        &mut self,
+        channel_samples: &[Vec<Sample>],
+        trim: usize,
+        remaining: usize,
+        pos: usize,
+    ) {
         if let Some(inputs) = &mut self.rb_inputs {
             for (ch, samples) in channel_samples.iter().enumerate() {
                 inputs[ch].write_from_at(pos, samples[trim..trim + remaining].iter().copied());
@@ -538,7 +783,6 @@ impl SendspinBridge {
         }
     }
 
-    /// Common state update after writing frames.
     fn update_state_after_write(&mut self, frames: usize, read_pos: usize) {
         if self.state == BridgeState::Prebuffering || self.state == BridgeState::Rebuffering {
             self.prebuffer_written += frames;
@@ -554,6 +798,8 @@ impl SendspinBridge {
         self.metrics.update(self.write_pos, read_pos);
     }
 
+    // ─── Metrics ────────────────────────────────────────────────────
+
     fn log_metrics(&mut self) {
         match self.state {
             BridgeState::Idle => {}
@@ -561,8 +807,20 @@ impl SendspinBridge {
                 info!("[buffer] waiting for DANTE subscriber");
             }
             BridgeState::Running => {
-                let synced = if self.sync_active { "synced" } else { "fallback" };
-                info!("[sync] mode={}", synced);
+                let mode = if self.anchor_server_us.is_some() {
+                    "scheduled"
+                } else {
+                    "sequential"
+                };
+                info!(
+                    "[sync] mode={} pending={} stale_drops={} trims={}/{} high_water={}",
+                    mode,
+                    self.pending_chunks.len(),
+                    self.stale_drops,
+                    self.trimmed_chunks,
+                    self.trimmed_frames,
+                    self.queued_high_water,
+                );
                 self.metrics.log(self.write_pos, self.get_read_pos());
             }
             _ => {}

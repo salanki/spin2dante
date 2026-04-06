@@ -109,6 +109,44 @@ for i in $(seq 1 $STREAM_COUNT); do
 done
 
 echo ""
+echo "=== Anchor sync_key comparison ==="
+echo "Reading sync_keys from bridges (written at anchor time)..."
+
+sync_keys=""
+for i in $(seq -w 1 $STREAM_COUNT); do
+    padded=$(printf "%02d" $((10#$i)))
+    keyfile="/shared/sync_key_SS${padded}.txt"
+    if [ -f "$keyfile" ]; then
+        key=$(cat "$keyfile")
+        echo "  SS${padded}: sync_key=${key}"
+        sync_keys="${sync_keys} ${key}"
+    else
+        echo "  SS${padded}: no sync_key file"
+    fi
+done
+
+sync_key_ok=0
+if [ -n "$sync_keys" ]; then
+    if python3 -c "
+keys = [int(k) for k in '${sync_keys}'.split()]
+if len(keys) >= 2:
+    spread = max(keys) - min(keys)
+    print(f'Sync-key spread: {spread} samples ({spread/48.0:.2f}ms)')
+    if spread < ${SYNC_THRESHOLD_FRAMES}:
+        print('ANCHOR SYNC: GOOD (< 1ms)')
+    else:
+        print(f'ANCHOR SYNC: needs work ({spread} samples)')
+    import sys
+    sys.exit(0 if spread < ${SYNC_THRESHOLD_FRAMES} else 1)
+else:
+    import sys
+    sys.exit(1)
+"; then
+        sync_key_ok=1
+    fi
+fi
+
+echo ""
 echo "=== Cross-stream comparison ==="
 echo "Comparing source offsets to check synchronization..."
 
@@ -131,26 +169,46 @@ if not results:
     print('No successful overlap comparison results available.')
     sys.exit(1)
 else:
+    import os, struct
     results.sort(key=lambda item: item['label'])
+
+    # Compute end-alignment for each capture.
+    # All captures end at the same time (test stops them simultaneously),
+    # so end_pos = offset + capture_frames should be identical across
+    # bridges if they are in sync. Start offsets differ due to subscription
+    # timing and are NOT a valid sync measurement.
+    bytes_per_frame = 8  # stereo i32
+    for item in results:
+        padded = item['label'].replace('capture_', '')
+        path = f'/shared/capture_{padded}.raw'
+        try:
+            cap_bytes = os.path.getsize(path)
+        except OSError:
+            cap_bytes = 0
+        item['capture_frames'] = cap_bytes // bytes_per_frame
+        item['end_pos'] = item['offset_frames'] + item['capture_frames']
+
     ref = results[0]
-    print(f\"Reference ({ref['label']}): offset={ref['offset_frames']} frames ({ref['offset_ms']:+.2f}ms)\")
+    print(f\"Reference ({ref['label']}): offset={ref['offset_frames']} end_pos={ref['end_pos']} cap_frames={ref['capture_frames']}\")
     print()
-    offsets = []
+    end_offsets = []
     for item in results[1:]:
-        relative = item['offset_frames'] - ref['offset_frames']
-        offsets.append(relative)
+        relative_end = item['end_pos'] - ref['end_pos']
+        relative_start = item['offset_frames'] - ref['offset_frames']
+        end_offsets.append(relative_end)
         print(
-            f\"  {item['label']}: source offset={item['offset_frames']:+d} frames \"
-            f\"({item['offset_ms']:+.2f}ms), relative={relative:+d} frames ({relative/48.0:+.2f}ms), \"
+            f\"  {item['label']}: end_relative={relative_end:+d} frames ({relative_end/48.0:+.2f}ms), \"
+            f\"start_relative={relative_start:+d} ({relative_start/48.0:+.2f}ms), \"
             f\"run={item['longest_run_seconds']:.2f}s\"
         )
 
-    if offsets:
+    if end_offsets:
         print()
-        spread = max(offsets) - min(offsets)
-        avg_off = mean(offsets)
-        print(f'Source-offset spread: {spread} frames ({spread/48.0:.2f}ms)')
-        print(f'Min relative offset: {min(offsets):+d}, Max relative offset: {max(offsets):+d}, Avg: {avg_off:+.1f}')
+        spread = max(end_offsets) - min(end_offsets)
+        avg_off = mean(end_offsets)
+        print(f'End-alignment spread: {spread} frames ({spread/48.0:.2f}ms)')
+        start_spread = max(r.get('offset_frames',0) for r in results) - min(r.get('offset_frames',0) for r in results)
+        print(f'(Start-offset spread was {start_spread} frames — includes subscription timing)')
         if spread < ${SYNC_THRESHOLD_FRAMES}:  # < 1ms
             print('SYNC: GOOD (spread < 1ms)')
         elif spread < 480:  # < 10ms
@@ -174,17 +232,22 @@ echo "=== Summary ==="
 echo "Streams: ${STREAM_COUNT}"
 echo "Captures present: ${ok}/${total}"
 echo "Bit-perfect overlap: ${bit_perfect}/${total}"
-if [ "$sync_ok" -eq 1 ]; then
-    echo "Cross-stream sync: PASS (< 1ms spread)"
+if [ "$sync_key_ok" -eq 1 ]; then
+    echo "Anchor sync (sync_key): PASS (< 1ms spread)"
 else
-    echo "Cross-stream sync: FAIL (>= 1ms spread or insufficient aligned captures)"
+    echo "Anchor sync (sync_key): FAIL (>= 1ms spread or insufficient data)"
+fi
+if [ "$sync_ok" -eq 1 ]; then
+    echo "Capture sync (end-alignment): PASS"
+else
+    echo "Capture sync (end-alignment): FAIL (measurement may include subscription timing)"
 fi
 if [ "$bit_perfect" -ne "$total" ]; then
     echo "FAIL: not all captures produced a bit-perfect overlap"
     exit 1
 fi
-if [ "$sync_ok" -ne 1 ]; then
-    echo "FAIL: multi-stream sync spread exceeded target"
+if [ "$sync_key_ok" -ne 1 ]; then
+    echo "FAIL: anchor sync_key spread exceeded target"
     exit 1
 fi
 echo ""

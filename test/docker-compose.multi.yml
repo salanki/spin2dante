@@ -45,6 +45,7 @@ x-bridge-env: &bridge-env
   INFERNO_RX_CHANNELS: "0"
   INFERNO_SAMPLE_RATE: "48000"
   RUST_LOG: "info"
+  SPIN2DANTE_WRITE_SYNC_KEY: "1"
 
 x-i2pipe-env: &i2pipe-env
   INFERNO_CLOCK_PATH: /shared/usrvclock
