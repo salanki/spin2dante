@@ -209,7 +209,7 @@ impl SendspinBridge {
                     },
                 ],
                 buffer_capacity: (SAMPLE_RATE as u32 * CHANNELS as u32 * 3 / 2), // ~500ms stereo 24-bit
-                supported_commands: vec!["volume".to_string(), "mute".to_string()],
+                supported_commands: vec![],
             };
             match ProtocolClientBuilder::builder()
                 .client_id(self.client_id.clone())
