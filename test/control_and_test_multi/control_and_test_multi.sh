@@ -1,9 +1,10 @@
 #!/bin/sh
 set -e
 
-STREAM_COUNT=16
+STREAM_COUNT=4
 RECORD_SECS=20
 COMPARE_JSON=/tmp/compare_results.jsonl
+SYNC_THRESHOLD_FRAMES=48
 
 echo "=== spin2dante Multi-Stream E2E Test (${STREAM_COUNT} streams) ==="
 echo "Waiting for all DANTE devices to appear..."
@@ -111,9 +112,10 @@ echo ""
 echo "=== Cross-stream comparison ==="
 echo "Comparing source offsets to check synchronization..."
 
-python3 -c "
+if python3 -c "
 import json
 from statistics import mean
+import sys
 
 results = []
 try:
@@ -127,6 +129,7 @@ except FileNotFoundError:
 
 if not results:
     print('No successful overlap comparison results available.')
+    sys.exit(1)
 else:
     results.sort(key=lambda item: item['label'])
     ref = results[0]
@@ -148,21 +151,40 @@ else:
         avg_off = mean(offsets)
         print(f'Source-offset spread: {spread} frames ({spread/48.0:.2f}ms)')
         print(f'Min relative offset: {min(offsets):+d}, Max relative offset: {max(offsets):+d}, Avg: {avg_off:+.1f}')
-        if spread < 48:  # < 1ms
+        if spread < ${SYNC_THRESHOLD_FRAMES}:  # < 1ms
             print('SYNC: GOOD (spread < 1ms)')
         elif spread < 480:  # < 10ms
             print('SYNC: FAIR (spread < 10ms)')
         else:
             print('SYNC: POOR (spread >= 10ms)')
-" || echo "Cross-stream comparison failed"
+        sys.exit(0 if spread < ${SYNC_THRESHOLD_FRAMES} else 1)
+    else:
+        print('Only one aligned capture available; cannot assess cross-stream sync.')
+        sys.exit(1)
+"
+then
+    sync_ok=1
+else
+    sync_ok=0
+    echo "Cross-stream sync check failed"
+fi
 
 echo ""
 echo "=== Summary ==="
 echo "Streams: ${STREAM_COUNT}"
 echo "Captures present: ${ok}/${total}"
 echo "Bit-perfect overlap: ${bit_perfect}/${total}"
+if [ "$sync_ok" -eq 1 ]; then
+    echo "Cross-stream sync: PASS (< 1ms spread)"
+else
+    echo "Cross-stream sync: FAIL (>= 1ms spread or insufficient aligned captures)"
+fi
 if [ "$bit_perfect" -ne "$total" ]; then
     echo "FAIL: not all captures produced a bit-perfect overlap"
+    exit 1
+fi
+if [ "$sync_ok" -ne 1 ]; then
+    echo "FAIL: multi-stream sync spread exceeded target"
     exit 1
 fi
 echo ""

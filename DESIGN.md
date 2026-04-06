@@ -233,7 +233,7 @@ The owned buffer path provides:
 - `readable_pos` tracking on the write side (inferno only reads validated data)
 - `unconditional_read() == false` (reads check readable_pos)
 - Hole detection and fill via `hole_fix_wait`
-- Configurable TX dithering, with spin2dante explicitly disabling the 24-bit path so PCM payloads can be validated bit-for-bit over the received overlap
+- Configurable TX dithering via `TX_SOURCE_BIT_DEPTH`, with spin2dante setting it to `24` so 24-bit TX preserves PCM payloads bit-for-bit over the received overlap
 
 The fork exposes `read_position` — the actual `start_ts` the FlowsTransmitter uses for ring reads. The bridge uses this for snap_to_live alignment and buffer metrics.
 

@@ -54,6 +54,101 @@ print(f'  {label} [{total_sec:>6.0f}s] |{line}|')
 " 2>/dev/null
 }
 
+render_sync() {
+    file_a="$1"
+    label_a="$2"
+    file_b="$3"
+    label_b="$4"
+    if [ ! -f "$file_a" ] || [ ! -f "$file_b" ]; then
+        return
+    fi
+    python3 -c "
+import struct, sys
+
+file_a = '$file_a'
+label_a = '$label_a'
+file_b = '$file_b'
+label_b = '$label_b'
+sr = 48000
+bytes_per_frame = 8
+window_sec = 8
+sample_step = 64          # 1.33ms resolution
+max_lag_frames = 4800     # +/- 100ms search window
+min_peak = 1 << 12
+
+def load_tail(path):
+    with open(path, 'rb') as f:
+        f.seek(0, 2)
+        total_bytes = f.tell()
+        total_frames = total_bytes // bytes_per_frame
+        window_frames = min(sr * window_sec, total_frames)
+        if window_frames <= sample_step * 8:
+            return []
+        start_byte = total_bytes - window_frames * bytes_per_frame
+        f.seek(start_byte)
+        data = f.read(window_frames * bytes_per_frame)
+    out = []
+    for frame in range(0, window_frames, sample_step):
+        offset = frame * bytes_per_frame
+        if offset + 4 <= len(data):
+            out.append(struct.unpack_from('<i', data, offset)[0])
+    return out
+
+a = load_tail(file_a)
+b = load_tail(file_b)
+if len(a) < 32 or len(b) < 32:
+    sys.exit(0)
+
+peak = max(max(abs(v) for v in a), max(abs(v) for v in b))
+if peak < min_peak:
+    print(f'  sync {label_a}<->{label_b}: insufficient signal')
+    sys.exit(0)
+
+n = min(len(a), len(b))
+a = a[-n:]
+b = b[-n:]
+
+mean_a = sum(a) / n
+mean_b = sum(b) / n
+a = [v - mean_a for v in a]
+b = [v - mean_b for v in b]
+
+energy_a = sum(v * v for v in a)
+energy_b = sum(v * v for v in b)
+if energy_a == 0 or energy_b == 0:
+    print(f'  sync {label_a}<->{label_b}: silent window')
+    sys.exit(0)
+
+max_lag_steps = min(max_lag_frames // sample_step, n // 3)
+best_lag = 0
+best_score = None
+
+for lag in range(-max_lag_steps, max_lag_steps + 1):
+    if lag >= 0:
+        seg_a = a[lag:]
+        seg_b = b[:len(seg_a)]
+    else:
+        seg_b = b[-lag:]
+        seg_a = a[:len(seg_b)]
+    if len(seg_a) < 16:
+        continue
+    score = sum(x * y for x, y in zip(seg_a, seg_b))
+    if best_score is None or score > best_score:
+        best_score = score
+        best_lag = lag
+
+lag_frames = best_lag * sample_step
+lag_ms = lag_frames * 1000.0 / sr
+if lag_frames > 0:
+    relation = f'{label_a} leads {label_b}'
+elif lag_frames < 0:
+    relation = f'{label_b} leads {label_a}'
+else:
+    relation = 'aligned'
+print(f'  sync {label_a}<->{label_b}: {lag_frames:+d} frames ({lag_ms:+.2f}ms), {relation}')
+" 2>/dev/null
+}
+
 render_final() {
     file="$1"
     label="$2"
@@ -169,6 +264,7 @@ while true; do
     # Live waveform (last 30s of each capture)
     render_live /output/bridge1.raw "Bridge1"
     render_live /output/bridge2.raw "Bridge2"
+    render_sync /output/bridge1.raw "Bridge1" /output/bridge2.raw "Bridge2"
 
     sleep 5
 done

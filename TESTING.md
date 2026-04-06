@@ -285,7 +285,7 @@ Tests 16 bridge instances all connected to the same Sendspin server, simulating 
 ### What it measures
 
 1. **Bit-perfect overlap**: Each capture is aligned against the shared reference signal and must contain one continuous exact match region
-2. **Cross-stream sync**: Compares the source-alignment offsets across all captures and reports the spread in samples and milliseconds
+2. **Cross-stream sync**: Compares the source-alignment offsets across all captures and requires the spread to stay below 1ms (< 48 samples at 48kHz)
 
 ```
 Source-offset spread: 24 frames (0.50ms)
@@ -293,9 +293,9 @@ SYNC: GOOD (spread < 1ms)
 ```
 
 Sync quality thresholds:
-- **GOOD**: < 1ms spread (< 48 samples)
-- **FAIR**: < 10ms spread (< 480 samples)
-- **POOR**: >= 10ms spread
+- **PASS**: < 1ms spread (< 48 samples)
+- **FAIL**: >= 1ms spread or insufficient aligned captures
+- The script still prints `GOOD` / `FAIR` / `POOR` for context, but only `GOOD` passes the test
 
 ### Resource requirements
 
@@ -370,7 +370,7 @@ Tested and validated via `make test-resilience`:
 ## Known Limitations
 
 - **Bit-perfect over overlap, not full-boundary perfection**: The automated check allows an unknown dropped prefix/suffix. It proves the received overlap matches exactly, but it does not require sample 0 of the source to be present.
-- **Sendspin source codec**: The `sendspin serve` command decides the codec. With a local WAV file it typically sends PCM, but behavior may vary by version.
+- **Sendspin source is 16-bit**: The `sendspin serve` CLI hardcodes its audio decoder to `s16` (16-bit signed) via PyAV, regardless of the input file's bit depth. A 24-bit WAV is truncated to 16-bit before being sent as "24-bit PCM." The test reference signal is generated at 16-bit to match this reality. True 24-bit end-to-end testing requires a Sendspin server that preserves 24-bit samples.
 - **PTP clock warmup**: 10-15s of "clock unavailable" is normal while the Statime follower syncs to the master. The bridge auto-realigns once the clock becomes available.
 - **Single-run test audio**: The 30s deterministic reference loops only if sendspin loops it. After 30s, the stream may end.
 - **FLAC not testable**: sendspin-rs v0.1 only has a PCM decoder. FLAC testing requires either a newer sendspin-rs or a custom decoder.
