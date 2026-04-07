@@ -64,7 +64,7 @@ services:
       context: ..
       dockerfile: Dockerfile
     entrypoint: ["/bin/sh", "-c"]
-    command: ["mkdir -p /shared/tmp_bridge && spin2dante --url ws://test_server:8927/sendspin --name SSResilience --buffer-ms 50 2>&1 | tee /shared/bridge.log"]
+    command: ["mkdir -p /shared/tmp_bridge && spin2dante --url ws://test_server:8927/sendspin --name SSResilience 2>&1 | tee /shared/bridge.log"]
     environment:
       INFERNO_CLOCK_PATH: /shared/usrvclock
       INFERNO_TX_CHANNELS: "2"

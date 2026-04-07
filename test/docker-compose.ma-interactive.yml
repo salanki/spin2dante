@@ -70,7 +70,7 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
-    command: ["--url", "ws://${MA_HOST:-172.17.0.1}:8927/sendspin", "--name", "Bridge1", "--buffer-ms", "50"]
+    command: ["--url", "ws://${MA_HOST:-172.17.0.1}:8927/sendspin", "--name", "Bridge1"]
     networks:
       - dante_net
     ulimits:
@@ -93,7 +93,7 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
-    command: ["--url", "ws://${MA_HOST:-172.17.0.1}:8927/sendspin", "--name", "Bridge2", "--buffer-ms", "50"]
+    command: ["--url", "ws://${MA_HOST:-172.17.0.1}:8927/sendspin", "--name", "Bridge2"]
     networks:
       - dante_net
     ulimits:

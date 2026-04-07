@@ -86,6 +86,8 @@ pub struct SendspinBridge {
     anchor_ring_pos: Option<usize>,
     // Scheduler counters
     stale_drops: u64,
+    /// Diagnostic counter: chunks processed since last anchor for debug logging
+    chunks_since_anchor: u64,
     trimmed_chunks: u64,
     trimmed_frames: u64,
     queued_high_water: usize,
@@ -118,6 +120,7 @@ impl SendspinBridge {
             anchor_server_us: None,
             anchor_ring_pos: None,
             stale_drops: 0,
+            chunks_since_anchor: u64::MAX, // suppress logging until first anchor
             trimmed_chunks: 0,
             trimmed_frames: 0,
             queued_high_water: 0,
@@ -208,7 +211,7 @@ impl SendspinBridge {
                         bit_depth: 16,
                     },
                 ],
-                buffer_capacity: (SAMPLE_RATE as u32 * CHANNELS as u32 * 3 / 2), // ~500ms stereo 24-bit
+                buffer_capacity: (SAMPLE_RATE as u32 * CHANNELS as u32 * 3 / 5), // ~200ms stereo 24-bit
                 supported_commands: vec![],
             };
             match ProtocolClientBuilder::builder()
@@ -477,6 +480,16 @@ impl SendspinBridge {
             return;
         }
 
+        // Log first few chunks after anchor for diagnostics
+        if self.chunks_since_anchor < 3 {
+            let first_bytes: Vec<u8> = chunk.data.iter().take(8).copied().collect();
+            info!(
+                "chunk[{}]: ts={} len={} first_bytes={:?}",
+                self.chunks_since_anchor, chunk.timestamp, chunk.data.len(), first_bytes
+            );
+        }
+        self.chunks_since_anchor += 1;
+
         // Decode PCM samples per channel
         let (frames, channel_samples) = self.decode_pcm(&chunk.data, &format);
         if frames == 0 {
@@ -567,6 +580,7 @@ impl SendspinBridge {
                     let ring_pos = snap_read_pos.wrapping_add(self.prebuffer_target);
                     self.anchor_server_us = Some(snap_server_us);
                     self.anchor_ring_pos = Some(ring_pos);
+                    self.chunks_since_anchor = 0;
                     let sync_key = ring_pos.wrapping_sub(
                         (snap_server_us as u128 * SAMPLE_RATE as u128 / 1_000_000) as usize,
                     );
