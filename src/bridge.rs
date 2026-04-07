@@ -480,12 +480,12 @@ impl SendspinBridge {
             return;
         }
 
-        // Log first few chunks after anchor for diagnostics
-        if self.chunks_since_anchor < 3 {
-            let first_bytes: Vec<u8> = chunk.data.iter().take(8).copied().collect();
+        // Log every chunk for cross-bridge comparison debugging
+        {
+            let hash: u64 = chunk.data.iter().map(|&b| b as u64).sum();
             info!(
-                "chunk[{}]: ts={} len={} first_bytes={:?}",
-                self.chunks_since_anchor, chunk.timestamp, chunk.data.len(), first_bytes
+                "chunk: ts={} len={} hash={}",
+                chunk.timestamp, chunk.data.len(), hash
             );
         }
         self.chunks_since_anchor += 1;
