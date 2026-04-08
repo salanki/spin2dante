@@ -102,6 +102,7 @@ for ((i = 0; i < BRIDGE_COUNT; i++)); do
     mkdir -p "$tmpdir"
 
     bashio::log.info "Starting bridge '$id' (${name}) on alt_port=${alt_port}, process_id=${process_id}"
+    HOME="/data" \
     TMPDIR="$tmpdir" \
     INFERNO_PROCESS_ID="$process_id" \
     INFERNO_ALT_PORT="$alt_port" \
