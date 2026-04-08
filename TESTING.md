@@ -318,12 +318,16 @@ The `--build` flag rebuilds changed images. The bridge Dockerfile doesn't cache 
 
 ## Multi-Stream Test (`make test-multi`)
 
-Tests 4 bridge instances all connected to the same Sendspin server, simulating a real multi-room deployment where all zones play the same stream in sync.
+Tests 4 bridge instances all connected to the same Sendspin server, simulating a real multi-room deployment where all zones play the same stream in sync. Bridges start at staggered times to validate sync across different join times:
+
+- SS01, SS02: start immediately
+- SS03: starts after 1 second
+- SS04: starts after 7 seconds
 
 ### What it does
 
 - 1 Sendspin server serving the deterministic reference signal
-- 4 bridge containers (SS01–SS04), each a separate DANTE TX device
+- 4 bridge containers (SS01–SS04), each a separate DANTE TX device, staggered startup
 - 4 i2pipe containers (rx01–rx04), each capturing one bridge's output
 - 1 control container that creates all 8 subscriptions and analyzes results
 
@@ -357,7 +361,7 @@ The test harness uses explicit `INFERNO_DEVICE_ID` values (not `PROCESS_ID`/`ALT
 
 ## Sync Verification Test (`docker-compose.sync-verify.yml`)
 
-The most authoritative measurement of cross-bridge DANTE output alignment. Routes 2 bridges to the **same** 4-channel i2pipe receiver: Bridge1's stereo pair on RX channels 01-02, Bridge2's on channels 03-04. Comparing channel 01 vs channel 03 within the single capture file eliminates all capture-side timing artifacts (subscription timing differences, file-read races, separate receiver clocks).
+The most authoritative measurement of cross-bridge DANTE output alignment. Routes 2 bridges to the **same** 4-channel i2pipe receiver: Bridge1's stereo pair on RX channels 01-02, Bridge2's on channels 03-04. Bridge2 starts 5 seconds after Bridge1 to validate sync across different join times. Comparing channel 01 vs channel 03 within the single capture file eliminates all capture-side timing artifacts (subscription timing differences, file-read races, separate receiver clocks).
 
 ### What it measures
 
