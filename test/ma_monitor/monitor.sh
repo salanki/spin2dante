@@ -54,6 +54,62 @@ print(f'  {label} [{total_sec:>6.0f}s] |{line}|')
 " 2>/dev/null
 }
 
+# Render waveform from a specific channel in the 4-channel sync capture
+render_live_4ch() {
+    file="$1"
+    label="$2"
+    channel="$3"  # 0-based channel index
+    if [ ! -f "$file" ] || [ "$(stat -c %s "$file" 2>/dev/null || echo 0)" -lt 16 ]; then
+        return
+    fi
+    python3 -c "
+import struct, sys
+
+file = '$file'
+label = '$label'
+ch = $channel
+sr = 48000
+bytes_per_frame = 16  # 4 channels * 4 bytes
+window_sec = 30
+cols = 60
+bars = ' ▁▂▃▄▅▆▇█'
+
+with open(file, 'rb') as f:
+    f.seek(0, 2)
+    total_bytes = f.tell()
+    total_frames = total_bytes // bytes_per_frame
+    window_frames = min(sr * window_sec, total_frames)
+    start_byte = max(0, total_bytes - window_frames * bytes_per_frame)
+    f.seek(start_byte)
+    data = f.read()
+
+frames = len(data) // bytes_per_frame
+if frames == 0:
+    sys.exit(0)
+
+block = max(1, frames // cols)
+peaks = []
+for c in range(min(cols, frames // block)):
+    peak = 0
+    for i in range(0, block, max(1, block // 16)):
+        offset = (c * block + i) * bytes_per_frame + ch * 4
+        if offset + 4 <= len(data):
+            val = abs(struct.unpack_from('<i', data, offset)[0])
+            if val > peak:
+                peak = val
+    peaks.append(peak)
+
+max_peak = max(peaks) if peaks and max(peaks) > 0 else 1
+line = ''
+for p in peaks:
+    idx = min(int(p / max_peak * (len(bars) - 1)), len(bars) - 1) if max_peak > 0 else 0
+    line += bars[idx]
+
+total_sec = total_frames / sr
+print(f'  {label} [{total_sec:>6.0f}s] |{line}|')
+" 2>/dev/null
+}
+
 render_sync() {
     file_a="$1"
     label_a="$2"
@@ -353,9 +409,9 @@ while true; do
         fi
     fi
 
-    # Live waveform (last 30s of each capture)
-    render_live /output/bridge1.raw "Bridge1"
-    render_live /output/bridge2.raw "Bridge2"
+    # Live waveform from shared 4-channel capture (same timing reference)
+    render_live_4ch /output/sync.raw "Bridge1" 0
+    render_live_4ch /output/sync.raw "Bridge2" 2
 
     # Sync analysis from shared 4-channel capture (bit-perfect, no artifacts)
     render_sync_precise /output/sync.raw
