@@ -67,7 +67,7 @@ make test
 make test-multi
 
 # Sync verification (2 bridges → 1 shared receiver, 4 channels)
-cd test && docker compose -f docker-compose.sync-verify.yml up --build --abort-on-container-exit control
+make test-sync-verify
 
 # Override inferno location if needed
 make test INFERNO_DIR=/path/to/inferno

@@ -52,7 +52,7 @@ test-resilience: build
 MA_HOST ?= $(shell docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || echo 172.17.0.1)
 test-ma-interactive: build inferno2pipe
 	mkdir -p output
-	rm -f output/bridge1.raw output/bridge2.raw
+	rm -f output/bridge1.raw output/bridge2.raw output/sync.raw
 	MA_HOST=$(MA_HOST) cd test && docker compose -f docker-compose.ma-interactive.yml up --build; \
 	docker compose -f docker-compose.ma-interactive.yml down --remove-orphans
 
@@ -75,4 +75,5 @@ clean:
 	cd test && docker compose down --remove-orphans --volumes 2>/dev/null || true
 	cd test && docker compose -f docker-compose.multi.yml down --remove-orphans --volumes 2>/dev/null || true
 	cd test && docker compose -f docker-compose.resilience.yml down --remove-orphans --volumes 2>/dev/null || true
+	cd test && docker compose -f docker-compose.sync-verify.yml down --remove-orphans --volumes 2>/dev/null || true
 	cd test && docker compose -f docker-compose.ma-interactive.yml down --remove-orphans --volumes 2>/dev/null || true
