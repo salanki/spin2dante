@@ -104,11 +104,14 @@ services:
       init:
         condition: service_completed_successfully
 
-  # --- 4 bridge instances ---
+  # --- 4 bridge instances (staggered startup to test sync across different join times) ---
+  # bridge-01 and bridge-02: start immediately
+  # bridge-03: 1 second delay
+  # bridge-04: 7 seconds delay (1+6)
   bridge-01: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b01 && exec spin2dante --url ws://sendspin_source:8927/sendspin --name SS01"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b01, INFERNO_DEVICE_ID: "0000000000000101" } }
   bridge-02: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b02 && exec spin2dante --url ws://sendspin_source:8927/sendspin --name SS02"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b02, INFERNO_DEVICE_ID: "0000000000000102" } }
-  bridge-03: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b03 && exec spin2dante --url ws://sendspin_source:8927/sendspin --name SS03"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b03, INFERNO_DEVICE_ID: "0000000000000103" } }
-  bridge-04: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b04 && exec spin2dante --url ws://sendspin_source:8927/sendspin --name SS04"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b04, INFERNO_DEVICE_ID: "0000000000000104" } }
+  bridge-03: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b03 && sleep 1 && exec spin2dante --url ws://sendspin_source:8927/sendspin --name SS03"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b03, INFERNO_DEVICE_ID: "0000000000000103" } }
+  bridge-04: { <<: *bridge-common, command: ["mkdir -p /shared/tmp_b04 && sleep 7 && exec spin2dante --url ws://sendspin_source:8927/sendspin --name SS04"], environment: { <<: *bridge-env, TMPDIR: /shared/tmp_b04, INFERNO_DEVICE_ID: "0000000000000104" } }
 
   # --- 4 i2pipe receivers ---
   i2pipe-01: { <<: *i2pipe-common, command: ["mkdir -p /shared/tmp_r01 && sleep 5 && inferno2pipe -c 2 -o /shared/capture_01.raw"], environment: { <<: *i2pipe-env, TMPDIR: /shared/tmp_r01, INFERNO_NAME: rx01, INFERNO_DEVICE_ID: "0000000000000201" }, depends_on: { ptp-follower: { condition: service_started }, bridge-01: { condition: service_started } } }

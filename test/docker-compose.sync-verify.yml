@@ -99,7 +99,7 @@ services:
 
   bridge-02:
     <<: *bridge-common
-    command: ["mkdir -p /shared/tmp_b02 && exec spin2dante --url ws://sendspin_source:8927/sendspin --name SS02"]
+    command: ["mkdir -p /shared/tmp_b02 && sleep 5 && exec spin2dante --url ws://sendspin_source:8927/sendspin --name SS02"]
     environment:
       <<: *bridge-env
       TMPDIR: /shared/tmp_b02
