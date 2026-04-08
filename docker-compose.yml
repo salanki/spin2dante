@@ -29,7 +29,6 @@ x-bridge: &bridge
     - inferno-state:/root/.local/state/inferno_aoip  # persistent device state
   environment: &bridge-env
     INFERNO_CLOCK_PATH: /shared/usrvclock
-    INFERNO_SAMPLE_RATE: "48000"
     # TMPDIR must be on the shared path so Statime can reach usrvclock
     # client sockets. Each bridge MUST have its own unique subdirectory
     # to avoid socket name collisions (PIDs overlap across containers).

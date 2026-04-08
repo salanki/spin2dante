@@ -81,7 +81,6 @@ services:
       - shared:/shared
     environment:
       INFERNO_CLOCK_PATH: /shared/usrvclock
-      INFERNO_SAMPLE_RATE: "48000"
       TMPDIR: /shared/tmp_bridge1
       RUST_LOG: "info"
     depends_on:

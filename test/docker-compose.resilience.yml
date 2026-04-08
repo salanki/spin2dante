@@ -69,7 +69,6 @@ services:
       INFERNO_CLOCK_PATH: /shared/usrvclock
       INFERNO_TX_CHANNELS: "2"
       INFERNO_RX_CHANNELS: "0"
-      INFERNO_SAMPLE_RATE: "48000"
       TMPDIR: /shared/tmp_bridge
       RUST_LOG: "info"
     volumes:

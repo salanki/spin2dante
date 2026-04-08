@@ -148,6 +148,7 @@ impl SendspinBridge {
         let mut config = std::collections::BTreeMap::new();
         config.insert("NAME".to_string(), self.device_name.clone());
         config.insert("TX_SOURCE_BIT_DEPTH".to_string(), "24".to_string());
+        config.insert("SAMPLE_RATE".to_string(), SAMPLE_RATE.to_string());
         let mut settings = Settings::new(&self.device_name, &short_name, None, &config);
         settings.make_tx_channels(CHANNELS);
         settings.make_rx_channels(0);

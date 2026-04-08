@@ -70,7 +70,6 @@ services:
     command: ["mkdir -p /shared/tmp_bridge && exec spin2dante --url ws://sendspin_source:8927/sendspin --name SSBridge"]
     environment:
       INFERNO_CLOCK_PATH: /shared/usrvclock
-      INFERNO_SAMPLE_RATE: "48000"
       TMPDIR: /shared/tmp_bridge
       RUST_LOG: "info"
     volumes:
