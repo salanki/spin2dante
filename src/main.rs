@@ -31,7 +31,7 @@ struct Args {
     name: String,
 
     /// Jitter buffer size in milliseconds
-    #[arg(long, default_value_t = 50)]
+    #[arg(long, default_value_t = 5)]
     buffer_ms: u32,
 
     /// Stable Sendspin client ID. If omitted, derived from name (+ INFERNO_PROCESS_ID if set).
