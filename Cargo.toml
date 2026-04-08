@@ -6,7 +6,7 @@ description = "Bridge from Sendspin audio streams to DANTE (Audio over IP) via i
 license = "GPL-3.0-or-later OR AGPL-3.0-or-later"
 
 [dependencies]
-inferno_aoip = { git = "https://github.com/salanki/inferno.git", rev = "fddbdb3" }
+inferno_aoip = { git = "https://github.com/salanki/inferno.git", rev = "f9f181f" }
 sendspin = "0.1"
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }

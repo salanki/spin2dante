@@ -1,0 +1,262 @@
+## Sync verification test: 2 bridges → 1 receiver (4 channels)
+##
+## Routes Bridge1 (TX ch 01,02) and Bridge2 (TX ch 01,02) to the SAME
+## i2pipe receiver on RX channels 01-04. Comparing ch 01 vs ch 03 in the
+## single capture file measures true DANTE output sync with zero
+## capture-side timing artifacts.
+
+volumes:
+  shared:
+
+networks:
+  audio_net:
+    driver: bridge
+
+x-bridge-common: &bridge-common
+  build:
+    context: ..
+    dockerfile: Dockerfile
+  entrypoint: ["/bin/sh", "-c"]
+  volumes:
+    - shared:/shared
+  networks:
+    - audio_net
+  ulimits:
+    memlock: 200000000
+  shm_size: 200m
+  depends_on:
+    ptp-follower:
+      condition: service_started
+    sendspin_source:
+      condition: service_started
+
+x-bridge-env: &bridge-env
+  INFERNO_CLOCK_PATH: /shared/usrvclock
+  INFERNO_TX_CHANNELS: "2"
+  INFERNO_RX_CHANNELS: "0"
+  INFERNO_SAMPLE_RATE: "48000"
+  RUST_LOG: "info"
+  SPIN2DANTE_WRITE_SYNC_KEY: "1"
+
+services:
+  init:
+    image: alpine:3
+    command: sh -c "rm -rf /shared/* && echo 'shared volume cleared'"
+    volumes:
+      - shared:/shared
+
+  ptp-master:
+    build:
+      context: ../statime
+    cap_add:
+      - SYS_TIME
+    environment:
+      STATIME_CONFIG: /etc/statime-ptpv2-master.toml
+    volumes:
+      - shared:/shared
+      - ../statime/statime-ptpv2-master.toml:/etc/statime-ptpv2-master.toml:ro
+    networks:
+      - audio_net
+    depends_on:
+      init:
+        condition: service_completed_successfully
+
+  ptp-follower:
+    build:
+      context: ../statime
+    cap_add:
+      - SYS_TIME
+    environment:
+      STATIME_CONFIG: /etc/statime-ptpv2-follower.toml
+    volumes:
+      - shared:/shared
+      - ../statime/statime-ptpv2-follower.toml:/etc/statime-ptpv2-follower.toml:ro
+    networks:
+      - audio_net
+    depends_on:
+      ptp-master:
+        condition: service_started
+
+  sendspin_source:
+    build:
+      context: .
+      dockerfile: ./sendspin_source/Dockerfile
+    volumes:
+      - shared:/shared
+    networks:
+      - audio_net
+    depends_on:
+      init:
+        condition: service_completed_successfully
+
+  # --- 2 bridges ---
+  bridge-01:
+    <<: *bridge-common
+    command: ["mkdir -p /shared/tmp_b01 && exec spin2dante --url ws://sendspin_source:8927/sendspin --name SS01"]
+    environment:
+      <<: *bridge-env
+      TMPDIR: /shared/tmp_b01
+      INFERNO_DEVICE_ID: "0000000000000101"
+
+  bridge-02:
+    <<: *bridge-common
+    command: ["mkdir -p /shared/tmp_b02 && exec spin2dante --url ws://sendspin_source:8927/sendspin --name SS02"]
+    environment:
+      <<: *bridge-env
+      TMPDIR: /shared/tmp_b02
+      INFERNO_DEVICE_ID: "0000000000000102"
+
+  # --- Single 4-channel receiver ---
+  # RX ch 01,02 from Bridge1; RX ch 03,04 from Bridge2
+  i2pipe:
+    image: inferno_aoip:alpine-i2pipe
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["mkdir -p /shared/tmp_rx && sleep 5 && inferno2pipe -c 4 -o /shared/sync_capture.raw"]
+    volumes:
+      - shared:/shared
+    networks:
+      - audio_net
+    ulimits:
+      memlock: 200000000
+    shm_size: 200m
+    environment:
+      INFERNO_CLOCK_PATH: /shared/usrvclock
+      INFERNO_SAMPLE_RATE: "48000"
+      INFERNO_RX_CHANNELS: "4"
+      INFERNO_TX_CHANNELS: "0"
+      INFERNO_NAME: synctest
+      INFERNO_DEVICE_ID: "0000000000000301"
+      TMPDIR: /shared/tmp_rx
+    depends_on:
+      ptp-follower:
+        condition: service_started
+      bridge-01:
+        condition: service_started
+      bridge-02:
+        condition: service_started
+
+  # --- Test orchestrator ---
+  control:
+    build:
+      context: .
+      dockerfile: ./control_and_test/Dockerfile
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        echo "=== Sync Verification Test ==="
+        echo "Waiting for devices..."
+
+        max_wait=120; waited=0
+        while true; do
+            devices=$$(netaudio device list 2>/dev/null || echo "")
+            b1=$$(echo "$$devices" | grep -c "SS01" || true)
+            b2=$$(echo "$$devices" | grep -c "SS02" || true)
+            rx=$$(echo "$$devices" | grep -c "synctest" || true)
+            echo "  bridges: $$b1+$$b2/2, receiver: $$rx/1 ($${waited}s)"
+            if [ "$$b1" -ge 1 ] && [ "$$b2" -ge 1 ] && [ "$$rx" -ge 1 ]; then
+                echo "All devices found!"
+                echo "$$devices"
+                break
+            fi
+            waited=$$((waited + 5))
+            if [ "$$waited" -ge "$$max_wait" ]; then
+                echo "TIMEOUT"; exit 1
+            fi
+            sleep 5
+        done
+
+        echo ""
+        echo "=== Creating subscriptions ==="
+        # Route Bridge1 ch 01,02 → synctest ch 01,02
+        netaudio subscription add --tx "01@SS01" --rx "01@synctest" 2>/dev/null
+        netaudio subscription add --tx "02@SS01" --rx "02@synctest" 2>/dev/null
+        echo "  synctest ch 01,02 <- SS01"
+
+        # Route Bridge2 ch 01,02 → synctest ch 03,04
+        netaudio subscription add --tx "01@SS02" --rx "03@synctest" 2>/dev/null
+        netaudio subscription add --tx "02@SS02" --rx "04@synctest" 2>/dev/null
+        echo "  synctest ch 03,04 <- SS02"
+
+        echo "Recording 20 seconds..."
+        sleep 20
+
+        echo ""
+        echo "=== Comparing channels in single capture ==="
+        python3 -c "
+        import struct, os, sys
+
+        path = '/shared/sync_capture.raw'
+        if not os.path.exists(path):
+            print('No capture file'); sys.exit(1)
+
+        bpf = 16  # 4 channels * 4 bytes (i32)
+        sr = 48000
+        size = os.path.getsize(path)
+        total_frames = size // bpf
+        print(f'Capture: {total_frames} frames ({total_frames/sr:.1f}s), 4 channels')
+
+        if total_frames < sr * 5:
+            print('Not enough data'); sys.exit(1)
+
+        # Read last 5 seconds
+        with open(path, 'rb') as f:
+            start = max(0, total_frames - 5 * sr)
+            f.seek(start * bpf)
+            data = f.read((total_frames - start) * bpf)
+
+        frames_read = len(data) // bpf
+        # Extract channels: ch0 = Bridge1 L, ch2 = Bridge2 L
+        ch0 = [struct.unpack_from('<i', data, i * bpf)[0] for i in range(frames_read)]
+        ch2 = [struct.unpack_from('<i', data, i * bpf + 8)[0] for i in range(frames_read)]
+
+        SYNC_THRESHOLD = 48  # < 1ms
+
+        # Search for best shift between ch01 and ch03 (+/- 100ms)
+        test_len = min(10000, frames_read - 4800)
+        best_shift = 0; best_matches = 0
+        for shift in range(-4800, 4801):
+            if shift >= 0:
+                a_slice = ch0[shift:shift+test_len]
+                b_slice = ch2[:test_len]
+            else:
+                b_slice = ch2[-shift:-shift+test_len]
+                a_slice = ch0[:test_len]
+            if len(a_slice) < test_len or len(b_slice) < test_len:
+                continue
+            m = sum(1 for a, b in zip(a_slice, b_slice) if a == b)
+            if m > best_matches:
+                best_matches = m; best_shift = shift
+                if m == test_len: break
+
+        print(f'Best shift: {best_shift:+d} samples ({best_shift/48.0:+.2f}ms), {best_matches}/{test_len} matches')
+
+        # Full verification at the best shift
+        if best_matches >= test_len * 0.99:
+            if best_shift >= 0:
+                full_m = sum(1 for a, b in zip(ch0[best_shift:], ch2[:frames_read - abs(best_shift)]) if a == b)
+            else:
+                full_m = sum(1 for a, b in zip(ch0[:frames_read - abs(best_shift)], ch2[-best_shift:]) if a == b)
+            full_n = frames_read - abs(best_shift)
+            pct = 100 * full_m / full_n if full_n > 0 else 0
+            print(f'Full verification: {full_m}/{full_n} ({pct:.4f}%)')
+            if full_m == full_n:
+                abs_shift = abs(best_shift)
+                ms = abs_shift / 48.0
+                if abs_shift < SYNC_THRESHOLD:
+                    print(f'SYNC: PASS — {abs_shift} samples ({ms:.2f}ms) offset, bit-perfect')
+                else:
+                    print(f'SYNC: FAIL — {abs_shift} samples ({ms:.2f}ms) exceeds {SYNC_THRESHOLD} sample threshold')
+                sys.exit(0 if abs_shift < SYNC_THRESHOLD else 1)
+
+        print(f'SYNC: FAIL — no bit-perfect match found')
+        sys.exit(1)
+        "
+    volumes:
+      - shared:/shared
+    networks:
+      - audio_net
+    depends_on:
+      bridge-01: { condition: service_started }
+      bridge-02: { condition: service_started }
+      i2pipe: { condition: service_started }
