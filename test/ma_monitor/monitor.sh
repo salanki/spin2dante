@@ -149,6 +149,84 @@ print(f'  sync {label_a}<->{label_b}: {lag_frames:+d} frames ({lag_ms:+.2f}ms), 
 " 2>/dev/null
 }
 
+render_sync_precise() {
+    file="$1"
+    if [ ! -f "$file" ] || [ "$(stat -c %s "$file" 2>/dev/null || echo 0)" -lt 384000 ]; then
+        return
+    fi
+    python3 -c "
+import struct, sys, os
+
+file = '$file'
+bpf = 16  # 4 channels * 4 bytes (i32)
+sr = 48000
+window_sec = 5
+
+size = os.path.getsize(file)
+total_frames = size // bpf
+if total_frames < sr * 2:
+    sys.exit(0)
+
+# Read last window_sec seconds
+n = min(sr * window_sec, total_frames)
+with open(file, 'rb') as f:
+    f.seek((total_frames - n) * bpf)
+    data = f.read(n * bpf)
+
+frames = len(data) // bpf
+if frames < sr:
+    sys.exit(0)
+
+# Extract ch01 (Bridge1 L) and ch03 (Bridge2 L)
+ch0 = [struct.unpack_from('<i', data, i * bpf)[0] for i in range(frames)]
+ch2 = [struct.unpack_from('<i', data, i * bpf + 8)[0] for i in range(frames)]
+
+# Check if both channels have signal
+peak0 = max(abs(v) for v in ch0[:1000]) if ch0 else 0
+peak2 = max(abs(v) for v in ch2[:1000]) if ch2 else 0
+if peak0 < (1 << 16) or peak2 < (1 << 16):
+    print(f'  sync: waiting for audio on both bridges')
+    sys.exit(0)
+
+# Search for best shift +/- 100ms
+test_len = min(2000, frames - 4800)
+best_shift = 0; best_matches = 0
+for shift in range(-4800, 4801):
+    if shift >= 0:
+        a = ch0[shift:shift+test_len]
+        b = ch2[:test_len]
+    else:
+        b = ch2[-shift:-shift+test_len]
+        a = ch0[:test_len]
+    if len(a) < test_len or len(b) < test_len:
+        continue
+    m = sum(1 for x, y in zip(a, b) if x == y)
+    if m > best_matches:
+        best_matches = m; best_shift = shift
+        if m == test_len: break
+
+if best_matches >= test_len * 0.99:
+    # Full verify
+    if best_shift >= 0:
+        full_m = sum(1 for a, b in zip(ch0[best_shift:], ch2[:frames - abs(best_shift)]) if a == b)
+    else:
+        full_m = sum(1 for a, b in zip(ch0[:frames - abs(best_shift)], ch2[-best_shift:]) if a == b)
+    full_n = frames - abs(best_shift)
+    pct = 100 * full_m / full_n if full_n > 0 else 0
+    abs_s = abs(best_shift)
+    ms = abs_s / 48.0
+    if full_m == full_n:
+        print(f'  sync: {abs_s} samples ({ms:.2f}ms) offset, bit-perfect ({full_m}/{full_n})')
+    else:
+        print(f'  sync: {abs_s} samples ({ms:.2f}ms) offset, {pct:.1f}% match ({full_m}/{full_n})')
+else:
+    if best_matches > 0:
+        print(f'  sync: no bit-perfect match (best {best_matches}/{test_len} at {best_shift:+d})')
+    else:
+        print(f'  sync: no match found')
+" 2>/dev/null
+}
+
 render_final() {
     file="$1"
     label="$2"
@@ -235,6 +313,7 @@ echo ""
 
 sub_rx1=0
 sub_rx2=0
+sub_sync=0
 
 while true; do
     devices=$(netaudio device list 2>/dev/null || echo "")
@@ -261,10 +340,25 @@ while true; do
         fi
     fi
 
+    # Subscribe the shared 4-channel sync receiver
+    if [ "$sub_sync" -eq 0 ]; then
+        has_sync=$(echo "$devices" | grep -c "rxsync" || true)
+        if [ "$has_b1" -ge 1 ] && [ "$has_b2" -ge 1 ] && [ "$has_sync" -ge 1 ]; then
+            echo "[$(date +%H:%M:%S)] subscribing rxsync <- Bridge1 + Bridge2..."
+            netaudio subscription add --tx "01@Bridge1" --rx "01@rxsync" 2>&1 \
+              && netaudio subscription add --tx "02@Bridge1" --rx "02@rxsync" 2>&1 \
+              && netaudio subscription add --tx "01@Bridge2" --rx "03@rxsync" 2>&1 \
+              && netaudio subscription add --tx "02@Bridge2" --rx "04@rxsync" 2>&1 \
+              && sub_sync=1 && echo "  OK" || echo "  FAILED (will retry)"
+        fi
+    fi
+
     # Live waveform (last 30s of each capture)
     render_live /output/bridge1.raw "Bridge1"
     render_live /output/bridge2.raw "Bridge2"
-    render_sync /output/bridge1.raw "Bridge1" /output/bridge2.raw "Bridge2"
+
+    # Sync analysis from shared 4-channel capture (bit-perfect, no artifacts)
+    render_sync_precise /output/sync.raw
 
     sleep 5
 done

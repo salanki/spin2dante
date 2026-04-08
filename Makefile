@@ -2,7 +2,7 @@ INFERNO_DIR ?= ../inferno
 MUSIC_ASSISTANT_COMPOSE ?= test/music_assistant/docker-compose.yml
 MUSIC_ASSISTANT_DOCKER_CONFIG ?= /tmp/music-assistant-docker-config
 
-.PHONY: build test test-multi test-resilience test-ma-interactive ma-up ma-down ma-logs clean
+.PHONY: build test test-multi test-sync-verify test-resilience test-ma-interactive ma-up ma-down ma-logs clean
 
 ## Build the bridge Docker image
 build:
@@ -21,12 +21,20 @@ test: build inferno2pipe
 	docker compose down --remove-orphans; \
 	exit $$result
 
-## Run the multi-stream E2E test (16 synchronized streams)
+## Run the multi-stream E2E test (4 synchronized streams)
 test-multi: build inferno2pipe
 	cd test && docker compose -f docker-compose.multi.yml down --remove-orphans 2>/dev/null; \
 	docker compose -f docker-compose.multi.yml up --build --abort-on-container-exit control_and_test; \
 	result=$$?; \
 	docker compose -f docker-compose.multi.yml down --remove-orphans; \
+	exit $$result
+
+## Sync verification (2 bridges → 1 shared 4-channel receiver, bit-perfect comparison)
+test-sync-verify: build inferno2pipe
+	cd test && docker compose -f docker-compose.sync-verify.yml down --remove-orphans 2>/dev/null; \
+	docker compose -f docker-compose.sync-verify.yml up --build --abort-on-container-exit control; \
+	result=$$?; \
+	docker compose -f docker-compose.sync-verify.yml down --remove-orphans; \
 	exit $$result
 
 ## Run the resilience test (stream stop/start, seek, server restart)

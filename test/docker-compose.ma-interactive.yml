@@ -161,7 +161,34 @@ services:
       bridge-2:
         condition: service_started
 
-  # Monitor: subscribes and reports capture status
+  # Shared 4-channel receiver for sync verification
+  # RX ch 01,02 from Bridge1; RX ch 03,04 from Bridge2
+  i2pipe-sync:
+    image: inferno_aoip:alpine-i2pipe
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["mkdir -p /shared/tmp_rxsync && sleep 10 && inferno2pipe -c 4 -o /output/sync.raw"]
+    networks:
+      - dante_net
+    ulimits:
+      memlock: 200000000
+    shm_size: 200m
+    volumes:
+      - shared:/shared
+      - ../output:/output
+    environment:
+      INFERNO_CLOCK_PATH: /shared/usrvclock
+      INFERNO_NAME: rxsync
+      INFERNO_SAMPLE_RATE: "48000"
+      INFERNO_RX_CHANNELS: "4"
+      INFERNO_TX_CHANNELS: "0"
+      TMPDIR: /shared/tmp_rxsync
+    depends_on:
+      bridge-1:
+        condition: service_started
+      bridge-2:
+        condition: service_started
+
+  # Monitor: subscribes and reports capture status + sync
   monitor:
     build:
       context: ./ma_monitor
@@ -174,4 +201,6 @@ services:
       i2pipe-1:
         condition: service_started
       i2pipe-2:
+        condition: service_started
+      i2pipe-sync:
         condition: service_started
