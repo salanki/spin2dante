@@ -63,6 +63,9 @@ Notes:
 # Single-stream E2E test (1 bridge, 1 receiver)
 make test
 
+# 32-bit PCM smoke test (1 bridge, 1 receiver)
+make test-32
+
 # Multi-stream E2E test (4 bridges in one Sendspin group, 4 receivers)
 make test-multi
 
@@ -436,7 +439,7 @@ Tested and validated via `make test-resilience`:
 | **Stream seek (StreamClear)** | Stale buffered audio is zeroed from current read position. Bridge enters rebuffer mode, refills jitter buffer with fresh data, then resumes. |
 | **Stream ends (StreamEnd)** | Ring zeroed, bridge enters Idle. DANTE device stays on network. |
 | **New stream with same format (StreamStart, already Running)** | Stale audio cleared, rebuffer mode, no device restart. |
-| **New stream with different format** | Format validated; if supported (PCM 16/24-bit), stream_format updated and enters WaitingForSubscriber. Unsupported formats rejected. Device is NOT restarted. |
+| **New stream with different format** | Format validated; if supported for the configured Dante bit depth (PCM 16/24/32-bit), `stream_format` is updated and the bridge enters WaitingForSubscriber. Unsupported formats are rejected. Device is NOT restarted. |
 | **PTP master disappears** | Statime stops exporting clock overlays. FlowsTransmitter reports "clock unavailable" until PTP master returns. Audio stops but bridge stays alive. |
 | **Multiple StreamStart without StreamEnd** | If already Running with same format: clear + rebuffer. Otherwise: enter WaitingForSubscriber. |
 

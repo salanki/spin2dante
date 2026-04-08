@@ -30,6 +30,7 @@ Each bridge entry contains:
 - `name`: DANTE device name to advertise
 - `url`: Sendspin WebSocket URL
 - `buffer_ms`: Jitter buffer size in milliseconds
+- `dante_bit_depth`: Dante TX bit depth (`16`, `24`, or `32`)
 - `process_id`: Unique Inferno process ID on the host IP
 - `alt_port`: Unique Inferno base UDP port, spaced at least 10 apart from other bridges
 
@@ -44,12 +45,14 @@ bridges:
     name: Kitchen
     url: ws://music-assistant.local:8927/sendspin
     buffer_ms: 50
+    dante_bit_depth: 24
     process_id: 1
     alt_port: 14000
   - id: livingroom
     name: Living Room
     url: ws://music-assistant.local:8927/sendspin
     buffer_ms: 50
+    dante_bit_depth: 24
     process_id: 2
     alt_port: 14010
 ```

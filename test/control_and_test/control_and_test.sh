@@ -47,7 +47,8 @@ fi
 netaudio subscription add --tx "02@${bridge_name}" --rx "02@i2pipe" || echo "Sub 2 failed"
 echo "Using bridge name: '$bridge_name'"
 
-echo "Subscriptions created. Recording for 20 seconds..."
+touch /shared/start_stream
+echo "Subscriptions created. Start signal written. Recording for 20 seconds..."
 sleep 20
 
 echo ""

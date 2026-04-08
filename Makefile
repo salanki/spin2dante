@@ -2,7 +2,7 @@ INFERNO_DIR ?= ../inferno
 MUSIC_ASSISTANT_COMPOSE ?= test/music_assistant/docker-compose.yml
 MUSIC_ASSISTANT_DOCKER_CONFIG ?= /tmp/music-assistant-docker-config
 
-.PHONY: build test test-multi test-sync-verify test-resilience test-ma-interactive ma-up ma-down ma-logs clean
+.PHONY: build test test-32 test-multi test-sync-verify test-resilience test-ma-interactive ma-up ma-down ma-logs clean
 
 ## Build the bridge Docker image
 build:
@@ -19,6 +19,14 @@ test: build inferno2pipe
 	docker compose up --build --abort-on-container-exit control_and_test; \
 	result=$$?; \
 	docker compose down --remove-orphans; \
+	exit $$result
+
+## Run the single-stream 32-bit PCM smoke test
+test-32: build inferno2pipe
+	cd test && docker compose -f docker-compose.32.yml down --remove-orphans 2>/dev/null; \
+	docker compose -f docker-compose.32.yml up --build --abort-on-container-exit control_and_test; \
+	result=$$?; \
+	docker compose -f docker-compose.32.yml down --remove-orphans; \
 	exit $$result
 
 ## Run the multi-stream E2E test (4 synchronized streams)
@@ -73,6 +81,7 @@ ma-logs:
 ## Remove all test containers, networks, and volumes
 clean:
 	cd test && docker compose down --remove-orphans --volumes 2>/dev/null || true
+	cd test && docker compose -f docker-compose.32.yml down --remove-orphans --volumes 2>/dev/null || true
 	cd test && docker compose -f docker-compose.multi.yml down --remove-orphans --volumes 2>/dev/null || true
 	cd test && docker compose -f docker-compose.resilience.yml down --remove-orphans --volumes 2>/dev/null || true
 	cd test && docker compose -f docker-compose.sync-verify.yml down --remove-orphans --volumes 2>/dev/null || true

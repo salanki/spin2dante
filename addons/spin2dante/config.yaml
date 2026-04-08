@@ -36,12 +36,14 @@ options:
       name: Kitchen
       url: "ws://music-assistant.local:8927/sendspin"
       buffer_ms: 50
+      dante_bit_depth: 24
       process_id: 1
       alt_port: 14000
     - id: livingroom
       name: "Living Room"
       url: "ws://music-assistant.local:8927/sendspin"
       buffer_ms: 50
+      dante_bit_depth: 24
       process_id: 2
       alt_port: 14010
 schema:
@@ -53,5 +55,6 @@ schema:
       name: str
       url: str
       buffer_ms: int(10,5000)
+      dante_bit_depth: list(16|24|32)
       process_id: int(1,65535)
       alt_port: int(1024,65532)

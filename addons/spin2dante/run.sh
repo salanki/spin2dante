@@ -95,6 +95,7 @@ for ((i = 0; i < BRIDGE_COUNT; i++)); do
     name="$(jq -r ".bridges[$i].name" "$OPTIONS_FILE")"
     url="$(jq -r ".bridges[$i].url" "$OPTIONS_FILE")"
     buffer_ms="$(jq -r ".bridges[$i].buffer_ms" "$OPTIONS_FILE")"
+    dante_bit_depth="$(jq -r ".bridges[$i].dante_bit_depth" "$OPTIONS_FILE")"
     process_id="$(jq -r ".bridges[$i].process_id" "$OPTIONS_FILE")"
     alt_port="$(jq -r ".bridges[$i].alt_port" "$OPTIONS_FILE")"
     tmpdir="/share/tmp_${id}"
@@ -108,7 +109,8 @@ for ((i = 0; i < BRIDGE_COUNT; i++)); do
     /usr/local/bin/spin2dante \
         --url "$url" \
         --name "$name" \
-        --buffer-ms "$buffer_ms" &
+        --buffer-ms "$buffer_ms" \
+        --dante-bit-depth "$dante_bit_depth" &
 
     PIDS+=("$!")
 done

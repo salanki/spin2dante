@@ -304,7 +304,7 @@ During PTP clock warmup, the buffer line shows:
 |---------|-------|-----|
 | `clock unavailable, can't transmit` | Statime not running, not synced, or no PTP master on network | Check `docker compose logs statime`. Ensure DANTE hardware is on the network as PTP master. |
 | `no active DANTE subscriber` | No DANTE receiver subscribed to this bridge | Use Dante Controller or `netaudio subscription add` to route channels |
-| `rejecting stream: codec 'flac'` | Sendspin source sending FLAC (not yet supported) | Configure source to send PCM. Bridge supports PCM 16/24-bit only. |
+| `rejecting stream: codec 'flac'` | Sendspin source sending FLAC (not yet supported) | Configure source to send PCM. Bridge supports PCM 16/24/32-bit depending on `--dante-bit-depth`. |
 | `rejecting stream: sample rate` | Source not at 48kHz | Configure source for 48kHz output |
 | `connection failed ... retrying` | Sendspin server not reachable | Check URL, ensure Music Assistant is running |
 | `session ended with error ... reconnecting` | Sendspin server restarted or network glitch | Normal — bridge auto-reconnects in 2 seconds |

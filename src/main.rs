@@ -12,7 +12,7 @@ Bridges Sendspin audio streams (e.g., from Music Assistant) to DANTE
 network audio using inferno_aoip. Stereo (2-channel) only.
 
 Receives audio via WebSocket from a Sendspin server and transmits it
-as a DANTE device on the local network. Bit-perfect for PCM (16/24-bit).
+as a DANTE device on the local network. Bit-perfect for PCM (16/24/32-bit).
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License (v3+) or the
@@ -34,6 +34,10 @@ struct Args {
     #[arg(long, default_value_t = 50)]
     buffer_ms: u32,
 
+    /// Dante TX bit depth (also caps advertised Sendspin PCM formats)
+    #[arg(long, default_value_t = 24, value_parser = parse_dante_bit_depth)]
+    dante_bit_depth: u8,
+
     /// Stable Sendspin client ID. If omitted, derived from name (+ INFERNO_PROCESS_ID if set).
     #[arg(long)]
     client_id: Option<String>,
@@ -47,14 +51,22 @@ async fn main() {
     let args = Args::parse();
 
     info!(
-        "spin2dante starting: url={} name={} buffer={}ms",
-        args.url, args.name, args.buffer_ms
+        "spin2dante starting: url={} name={} buffer={}ms dante_bit_depth={}",
+        args.url, args.name, args.buffer_ms, args.dante_bit_depth
     );
 
-    let client_id = args.client_id.unwrap_or_else(|| derive_client_id(&args.name));
+    let client_id = args
+        .client_id
+        .unwrap_or_else(|| derive_client_id(&args.name));
     info!("using Sendspin client_id={}", client_id);
 
-    let mut bridge = bridge::SendspinBridge::new(args.url, args.name, args.buffer_ms, client_id);
+    let mut bridge = bridge::SendspinBridge::new(
+        args.url,
+        args.name,
+        args.buffer_ms,
+        args.dante_bit_depth,
+        client_id,
+    );
 
     if let Err(e) = bridge.run().await {
         log::error!("bridge error: {e}");
@@ -80,4 +92,14 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
+}
+
+fn parse_dante_bit_depth(value: &str) -> Result<u8, String> {
+    let bit_depth = value
+        .parse::<u8>()
+        .map_err(|_| "dante bit depth must be one of: 16, 24, 32".to_string())?;
+    match bit_depth {
+        16 | 24 | 32 => Ok(bit_depth),
+        _ => Err("dante bit depth must be one of: 16, 24, 32".to_string()),
+    }
 }

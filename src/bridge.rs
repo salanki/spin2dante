@@ -5,7 +5,9 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 use atomic::Atomic;
-use inferno_aoip::device_server::{DeviceServer, OwnedBuffer, RBInput, ReadPositionSnapshot, Sample, Settings};
+use inferno_aoip::device_server::{
+    DeviceServer, OwnedBuffer, RBInput, ReadPositionSnapshot, Sample, Settings,
+};
 use log::{debug, error, info, warn};
 use sendspin::protocol::client::AudioChunk;
 use sendspin::protocol::messages::{AudioFormatSpec, Message, PlayerV1Support};
@@ -62,6 +64,7 @@ pub struct SendspinBridge {
     device_name: String,
     client_id: String,
     buffer_ms: u32,
+    dante_bit_depth: u8,
     state: BridgeState,
     // Device + TX state (persistent for process lifetime)
     rb_inputs: Option<Vec<RBInput<Sample, OwnedBuffer<Atomic<Sample>>>>>,
@@ -93,13 +96,20 @@ pub struct SendspinBridge {
 }
 
 impl SendspinBridge {
-    pub fn new(url: String, device_name: String, buffer_ms: u32, client_id: String) -> Self {
+    pub fn new(
+        url: String,
+        device_name: String,
+        buffer_ms: u32,
+        dante_bit_depth: u8,
+        client_id: String,
+    ) -> Self {
         let prebuffer_target = (SAMPLE_RATE as usize * buffer_ms as usize) / 1000;
         Self {
             url,
             device_name,
             client_id,
             buffer_ms,
+            dante_bit_depth,
             state: BridgeState::Idle,
             rb_inputs: None,
             device_server: None,
@@ -147,7 +157,14 @@ impl SendspinBridge {
         let short_name = self.device_name.chars().take(14).collect::<String>();
         let mut config = std::collections::BTreeMap::new();
         config.insert("NAME".to_string(), self.device_name.clone());
-        config.insert("TX_SOURCE_BIT_DEPTH".to_string(), "24".to_string());
+        config.insert(
+            "TX_SOURCE_BIT_DEPTH".to_string(),
+            self.dante_bit_depth.to_string(),
+        );
+        config.insert(
+            "BITS_PER_SAMPLE".to_string(),
+            self.dante_bit_depth.to_string(),
+        );
         config.insert("SAMPLE_RATE".to_string(), SAMPLE_RATE.to_string());
         let mut settings = Settings::new(&self.device_name, &short_name, None, &config);
         settings.make_tx_channels(CHANNELS);
@@ -195,21 +212,17 @@ impl SendspinBridge {
             // audio too far ahead of real-time. The pending queue + ring need
             // the server lead to fit within RING_BUFFER_SIZE (~341ms).
             let player_support = PlayerV1Support {
-                supported_formats: vec![
-                    AudioFormatSpec {
+                supported_formats: self
+                    .supported_sendspin_bit_depths()
+                    .into_iter()
+                    .map(|bit_depth| AudioFormatSpec {
                         codec: "pcm".to_string(),
                         channels: CHANNELS as u8,
                         sample_rate: SAMPLE_RATE,
-                        bit_depth: 24,
-                    },
-                    AudioFormatSpec {
-                        codec: "pcm".to_string(),
-                        channels: CHANNELS as u8,
-                        sample_rate: SAMPLE_RATE,
-                        bit_depth: 16,
-                    },
-                ],
-                buffer_capacity: (SAMPLE_RATE as u32 * CHANNELS as u32 * 3 / 5), // ~200ms stereo 24-bit
+                        bit_depth,
+                    })
+                    .collect(),
+                buffer_capacity: (SAMPLE_RATE as u32 * CHANNELS as u32 * 3 / 5), // ~200ms stereo PCM
                 supported_commands: vec![],
             };
             match ProtocolClientBuilder::builder()
@@ -300,10 +313,15 @@ impl SendspinBridge {
                         );
                         return;
                     }
-                    if format.bit_depth != 16 && format.bit_depth != 24 {
+                    if !self.supports_sendspin_bit_depth(format.bit_depth) {
                         error!(
-                            "rejecting stream: PCM bit depth {}, only 16 or 24 supported",
-                            format.bit_depth
+                            "rejecting stream: PCM bit depth {}, supported: {}",
+                            format.bit_depth,
+                            self.supported_sendspin_bit_depths()
+                                .into_iter()
+                                .map(|depth| depth.to_string())
+                                .collect::<Vec<_>>()
+                                .join(", ")
                         );
                         return;
                     }
@@ -712,8 +730,22 @@ impl SendspinBridge {
 
     // ─── PCM decode ─────────────────────────────────────────────────
 
+    fn supported_sendspin_bit_depths(&self) -> Vec<u8> {
+        match self.dante_bit_depth {
+            32 => vec![32, 24, 16],
+            24 => vec![24, 16],
+            16 => vec![16],
+            other => panic!("unsupported dante bit depth {other}"),
+        }
+    }
+
+    fn supports_sendspin_bit_depth(&self, bit_depth: u8) -> bool {
+        self.supported_sendspin_bit_depths().contains(&bit_depth)
+    }
+
     fn decode_pcm(&self, data: &[u8], format: &StreamFormat) -> (usize, Vec<Vec<Sample>>) {
         let (bytes_per_sample, frames) = match format.bit_depth {
+            32 => (4, data.len() / (4 * CHANNELS)),
             24 => (3, data.len() / (3 * CHANNELS)),
             16 => (2, data.len() / (2 * CHANNELS)),
             _ => return (0, vec![]),
@@ -725,15 +757,23 @@ impl SendspinBridge {
         for frame in 0..frames {
             for ch in 0..CHANNELS {
                 let offset = frame * frame_size + ch * bytes_per_sample;
-                let sample = if bytes_per_sample == 3 {
-                    let b = &data[offset..offset + 3];
-                    let raw = (b[0] as i32) | ((b[1] as i32) << 8) | ((b[2] as i32) << 16);
-                    let sign_extended = (raw << 8) >> 8;
-                    sign_extended << 8
-                } else {
-                    let b = &data[offset..offset + 2];
-                    let raw = i16::from_le_bytes([b[0], b[1]]) as i32;
-                    raw << 16
+                let sample = match bytes_per_sample {
+                    4 => {
+                        let b = &data[offset..offset + 4];
+                        i32::from_le_bytes([b[0], b[1], b[2], b[3]])
+                    }
+                    3 => {
+                        let b = &data[offset..offset + 3];
+                        let raw = (b[0] as i32) | ((b[1] as i32) << 8) | ((b[2] as i32) << 16);
+                        let sign_extended = (raw << 8) >> 8;
+                        sign_extended << 8
+                    }
+                    2 => {
+                        let b = &data[offset..offset + 2];
+                        let raw = i16::from_le_bytes([b[0], b[1]]) as i32;
+                        raw << 16
+                    }
+                    _ => unreachable!("unsupported PCM width"),
                 };
                 channels[ch].push(sample);
             }

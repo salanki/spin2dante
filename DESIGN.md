@@ -34,7 +34,7 @@ Sendspin Server (Music Assistant)
    DANTE Receivers
 ```
 
-The bridge uses a fork of inferno_aoip (pinned to commit `5b1c9d1`) that adds `transmit_from_owned_buffer()` and `ReadPositionSnapshot`.
+The bridge uses a fork of inferno_aoip (pinned to commit `7fc7c5e`) that adds `transmit_from_owned_buffer()`, `ReadPositionSnapshot`, and configurable Dante TX bit depth.
 
 ## Two-Stage Queue
 
@@ -48,7 +48,7 @@ The pending queue decouples chunk arrival from ring placement. Chunks are draine
 
 ### Buffer capacity
 
-The bridge advertises a small `buffer_capacity` (~500ms of stereo 24-bit PCM) via the Sendspin `PlayerV1Support` handshake, so the server doesn't send audio too far ahead of real-time.
+The bridge advertises a small `buffer_capacity` (~500ms of stereo PCM) via the Sendspin `PlayerV1Support` handshake, so the server doesn't send audio too far ahead of real-time.
 
 ## Cross-Bridge Sync Architecture
 
@@ -165,15 +165,22 @@ process start → Idle (device + TX alive, ring silent)
 
 ## Sample Format Alignment
 
+- **Sendspin PCM 32-bit**: 4 bytes LE signed → parse as i32
 - **Sendspin PCM 24-bit**: 3 bytes LE signed → sign-extend to i32 → shift left 8
 - **Sendspin PCM 16-bit**: 2 bytes LE signed → cast to i32 → shift left 16
-- **Inferno `Sample`**: i32 with 24-bit value in upper 24 bits
+- **Inferno `Sample`**: i32 transport sample used by inferno TX
 
-The bridge currently advertises and accepts PCM `16-bit` and `24-bit` Sendspin streams. Both are transported losslessly through Inferno's `Sample` representation.
+The bridge advertises Sendspin PCM formats based on the configured Dante TX bit depth:
 
-`TX_SOURCE_BIT_DEPTH` is intentionally fixed to `24`. This is not a statement that the bridge only supports 24-bit source audio; it reflects Inferno's 24-bit-oriented TX sample path and keeps TX dithering disabled for bit-perfect PCM transport.
+- `--dante-bit-depth 16` → advertise `16-bit`
+- `--dante-bit-depth 24` → advertise `24-bit`, `16-bit`
+- `--dante-bit-depth 32` → advertise `32-bit`, `24-bit`, `16-bit`
 
-This is an implementation choice, not a fundamental architectural limit. Supporting wider PCM formats in the future would require explicit protocol, decode, and TX-path validation, but the bridge design itself is not inherently restricted to only `16-bit` and `24-bit` PCM.
+All advertised formats are transported losslessly through Inferno's `Sample` representation.
+
+The bridge sets both Inferno `BITS_PER_SAMPLE` and `TX_SOURCE_BIT_DEPTH` to the configured Dante TX depth. `BITS_PER_SAMPLE` controls the actual Dante flow format; `TX_SOURCE_BIT_DEPTH` controls Inferno's dithering decision.
+
+This is still an implementation choice, not a fundamental architectural limit. Supporting wider PCM formats in the future would require explicit protocol, decode, and TX-path validation, but the bridge design itself is not inherently restricted to only `16-bit`, `24-bit`, and `32-bit` PCM.
 
 ## Player Capabilities
 
@@ -185,12 +192,13 @@ One bridge process per Sendspin stream. Each bridge needs unique `INFERNO_PROCES
 
 ## Inferno Fork
 
-[`github.com/salanki/inferno`](https://github.com/salanki/inferno/tree/spin2dante-owned-buffer), pinned to commit `5b1c9d1`:
+[`github.com/salanki/inferno`](https://github.com/salanki/inferno/tree/spin2dante-owned-buffer), pinned to commit `7fc7c5e`:
 
 - `transmit_from_owned_buffer()` — creates owned ring buffers, returns `RBInput` handles
 - `ReadPositionSnapshot` — seqlock `(read_pos, monotonic_nanos, ref_instant)` for precise timing
 - `read_position: Arc<AtomicUsize>` — exposes TX consumer cursor
-- `TX_SOURCE_BIT_DEPTH` — controls dithering (set to 24 for bit-perfect PCM)
+- `BITS_PER_SAMPLE` — controls the actual Dante TX bit depth
+- `TX_SOURCE_BIT_DEPTH` — controls dithering relative to that TX format
 
 ## Lessons Learned
 
