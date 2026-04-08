@@ -69,11 +69,49 @@ make test-multi
 # Sync verification (2 bridges → 1 shared receiver, 4 channels)
 make test-sync-verify
 
+# Interactive Music Assistant test (2 bridges, manual playback)
+make test-ma-interactive
+
 # Override inferno location if needed
 make test INFERNO_DIR=/path/to/inferno
 ```
 
 The Makefile handles building the bridge image, the inferno2pipe image (with submodule init), the Music Assistant helper workflow, and the docker-compose based test runs.
+
+## Interactive Music Assistant Test (`make test-ma-interactive`)
+
+For manual testing against a real Music Assistant instance. Two bridges appear as players in MA; you control playback from the MA UI.
+
+### Prerequisites
+
+Music Assistant must be running on the host (`make ma-up`).
+
+### What it runs
+
+- 2 bridges (Bridge1, Bridge2) connected to MA via host gateway
+- 3 DANTE receivers:
+  - **rx1** — captures Bridge1's stereo output → `output/bridge1.raw`
+  - **rx2** — captures Bridge2's stereo output → `output/bridge2.raw`
+  - **rxsync** — captures BOTH bridges into one 4-channel file → `output/sync.raw` (Bridge1 on ch 01-02, Bridge2 on ch 03-04)
+- A monitor that subscribes all receivers and reports:
+  - Live ASCII waveform for each bridge
+  - Bit-perfect sync comparison from the shared 4-channel capture (compares ch 01 vs ch 03)
+
+### Usage
+
+1. `make ma-up` — start Music Assistant
+2. `make test-ma-interactive` — start bridges and receivers
+3. Open MA at `http://localhost:8095`, select Bridge1 and Bridge2 as players, group them
+4. Play music — the monitor shows live waveforms and sync status
+5. Ctrl-C to stop and see final waveform analysis
+
+### Output files
+
+Convert captures to WAV for listening:
+```sh
+sox --no-dither -t raw -e signed-integer -b 32 -c 2 -r 48000 output/bridge1.raw -b 24 output/bridge1.wav
+sox --no-dither -t raw -e signed-integer -b 32 -c 2 -r 48000 output/bridge2.raw -b 24 output/bridge2.wav
+```
 
 ## Test Architecture
 
