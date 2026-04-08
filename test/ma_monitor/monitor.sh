@@ -367,45 +367,36 @@ echo "Select Bridge1/Bridge2 as players in Music Assistant."
 echo "Press Ctrl-C to stop and see full waveform analysis."
 echo ""
 
-sub_rx1=0
-sub_rx2=0
-sub_sync=0
+subscribed=0
 
 while true; do
     devices=$(netaudio device list 2>/dev/null || echo "")
 
-    if [ "$sub_rx1" -eq 0 ]; then
+    if [ "$subscribed" -eq 0 ]; then
         has_b1=$(echo "$devices" | grep -c "Bridge1" || true)
-        has_rx1=$(echo "$devices" | grep -c "rx1" || true)
-        if [ "$has_b1" -ge 1 ] && [ "$has_rx1" -ge 1 ]; then
-            echo "[$(date +%H:%M:%S)] subscribing rx1 <- Bridge1..."
-            netaudio subscription add --tx "01@Bridge1" --rx "01@rx1" 2>&1 \
-              && netaudio subscription add --tx "02@Bridge1" --rx "02@rx1" 2>&1 \
-              && sub_rx1=1 && echo "  OK" || echo "  FAILED (will retry)"
-        fi
-    fi
-
-    if [ "$sub_rx2" -eq 0 ]; then
         has_b2=$(echo "$devices" | grep -c "Bridge2" || true)
+        has_rx1=$(echo "$devices" | grep -c "rx1" || true)
         has_rx2=$(echo "$devices" | grep -c "rx2" || true)
-        if [ "$has_b2" -ge 1 ] && [ "$has_rx2" -ge 1 ]; then
-            echo "[$(date +%H:%M:%S)] subscribing rx2 <- Bridge2..."
-            netaudio subscription add --tx "01@Bridge2" --rx "01@rx2" 2>&1 \
-              && netaudio subscription add --tx "02@Bridge2" --rx "02@rx2" 2>&1 \
-              && sub_rx2=1 && echo "  OK" || echo "  FAILED (will retry)"
-        fi
-    fi
-
-    # Subscribe the shared 4-channel sync receiver
-    if [ "$sub_sync" -eq 0 ]; then
         has_sync=$(echo "$devices" | grep -c "rxsync" || true)
-        if [ "$has_b1" -ge 1 ] && [ "$has_b2" -ge 1 ] && [ "$has_sync" -ge 1 ]; then
-            echo "[$(date +%H:%M:%S)] subscribing rxsync <- Bridge1 + Bridge2..."
-            netaudio subscription add --tx "01@Bridge1" --rx "01@rxsync" 2>&1 \
-              && netaudio subscription add --tx "02@Bridge1" --rx "02@rxsync" 2>&1 \
-              && netaudio subscription add --tx "01@Bridge2" --rx "03@rxsync" 2>&1 \
-              && netaudio subscription add --tx "02@Bridge2" --rx "04@rxsync" 2>&1 \
-              && sub_sync=1 && echo "  OK" || echo "  FAILED (will retry)"
+
+        if [ "$has_b1" -ge 1 ] && [ "$has_b2" -ge 1 ] && \
+           [ "$has_rx1" -ge 1 ] && [ "$has_rx2" -ge 1 ] && [ "$has_sync" -ge 1 ]; then
+            echo "[$(date +%H:%M:%S)] all devices found, creating subscriptions..."
+            # Run all subscriptions in parallel
+            (netaudio subscription add --tx "01@Bridge1" --rx "01@rx1" 2>/dev/null && \
+             netaudio subscription add --tx "02@Bridge1" --rx "02@rx1" 2>/dev/null && \
+             echo "  rx1 <- Bridge1: OK") &
+            (netaudio subscription add --tx "01@Bridge2" --rx "01@rx2" 2>/dev/null && \
+             netaudio subscription add --tx "02@Bridge2" --rx "02@rx2" 2>/dev/null && \
+             echo "  rx2 <- Bridge2: OK") &
+            (netaudio subscription add --tx "01@Bridge1" --rx "01@rxsync" 2>/dev/null && \
+             netaudio subscription add --tx "02@Bridge1" --rx "02@rxsync" 2>/dev/null && \
+             netaudio subscription add --tx "01@Bridge2" --rx "03@rxsync" 2>/dev/null && \
+             netaudio subscription add --tx "02@Bridge2" --rx "04@rxsync" 2>/dev/null && \
+             echo "  rxsync <- Bridge1 + Bridge2: OK") &
+            wait
+            subscribed=1
+            echo "[$(date +%H:%M:%S)] subscriptions complete"
         fi
     fi
 
