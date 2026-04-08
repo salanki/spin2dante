@@ -66,6 +66,9 @@ make test
 # Multi-stream E2E test (4 bridges in one Sendspin group, 4 receivers)
 make test-multi
 
+# Sync verification (2 bridges → 1 shared receiver, 4 channels)
+cd test && docker compose -f docker-compose.sync-verify.yml up --build --abort-on-container-exit control
+
 # Override inferno location if needed
 make test INFERNO_DIR=/path/to/inferno
 ```
@@ -313,6 +316,30 @@ Sync pass/fail:
 The test harness uses explicit `INFERNO_DEVICE_ID` values (not `PROCESS_ID`/`ALT_PORT`) because all containers are on a Docker bridge network with unique IPs, unlike production where all bridges share the host IP. This is a harness-specific shortcut.
 - Bridge IDs: `0000000000000101` through `0000000000000104`
 - Receiver IDs: `0000000000000201` through `0000000000000204`
+
+## Sync Verification Test (`docker-compose.sync-verify.yml`)
+
+The most authoritative measurement of cross-bridge DANTE output alignment. Routes 2 bridges to the **same** 4-channel i2pipe receiver: Bridge1's stereo pair on RX channels 01-02, Bridge2's on channels 03-04. Comparing channel 01 vs channel 03 within the single capture file eliminates all capture-side timing artifacts (subscription timing differences, file-read races, separate receiver clocks).
+
+### What it measures
+
+Searches for a bit-perfect match between Bridge1's left channel and Bridge2's left channel at various sample offsets. If a perfect match is found, reports the offset magnitude. This is a **timing test** — it verifies that both bridges output the same audio at the same PTP instant. It does not test stereo channel integrity separately.
+
+### Pass criteria
+
+Offset magnitude < 48 samples (< 1ms), with 100% bit-perfect match at the verified offset.
+
+### Typical result
+
+```
+Best shift: -5 samples (-0.10ms), 10000/10000 matches
+Full verification: 239995/239995 (100.0000%)
+SYNC: PASS — 5 samples (0.10ms) offset, bit-perfect
+```
+
+### Why this test exists
+
+Earlier measurements using separate capture files per bridge showed 14-38ms apparent offsets, which turned out to be measurement artifacts from different subscription timing and file-growth races. The single-receiver method was created to eliminate these artifacts and measure the true DANTE output alignment.
 
 ## PTP Clock Architecture (all tests)
 
