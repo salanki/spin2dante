@@ -43,13 +43,13 @@ bridges:
   - id: kitchen
     name: Kitchen
     url: ws://music-assistant.local:8927/sendspin
-    buffer_ms: 50
+    buffer_ms: 5
     process_id: 1
     alt_port: 14000
   - id: livingroom
     name: Living Room
     url: ws://music-assistant.local:8927/sendspin
-    buffer_ms: 50
+    buffer_ms: 5
     process_id: 2
     alt_port: 14010
 ```

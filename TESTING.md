@@ -234,8 +234,8 @@ docker compose logs control_and_test
 bridge  | connected to Sendspin server
 bridge  | stream start: codec=pcm rate=48000 ch=2 bits=24
 bridge  | starting FlowsTransmitter (start_time=0)
-bridge  | prebuffer complete (2400 samples written), fill=..., now transmitting
-bridge  | [buffer] fill=... target=2400 ...
+bridge  | prebuffer complete (240 samples written), fill=..., now transmitting
+bridge  | [buffer] fill=... target=240 ...
 
 control_and_test | [capture.raw] bit-perfect overlap found
 control_and_test | Capture file size OK

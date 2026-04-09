@@ -124,7 +124,7 @@ Each bridge instance is configured via CLI arguments and environment variables.
 |----------|---------|-------------|
 | `--url` / `-u` | (required) | Sendspin server WebSocket URL |
 | `--name` / `-n` | "Sendspin Bridge" | DANTE device name visible on the network |
-| `--buffer-ms` | 50 | Jitter buffer size in milliseconds |
+| `--buffer-ms` | 5 | Jitter buffer size in milliseconds |
 | `--client-id` | Derived from name | Stable Sendspin/Music Assistant player identity |
 
 ### Environment Variables
