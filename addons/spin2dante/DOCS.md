@@ -33,6 +33,17 @@ Each bridge entry contains:
 - `process_id`: Unique Inferno process ID on the host IP
 - `alt_port`: Unique Inferno base UDP port, spaced at least 10 apart from other bridges
 
+### Sendspin URL
+
+If the Music Assistant add-on is installed on the same Home Assistant instance
+and its Sendspin server is bound to all interfaces (the default),
+`ws://127.0.0.1:8927/sendspin` works directly — both add-ons run with host
+networking, so they share the same loopback. `*.local` hostnames do **not**
+resolve from inside add-on containers, so mDNS names will not work here.
+
+For a remote Music Assistant, use its LAN IP or its Supervisor DNS name
+(e.g. `ws://<slug>.local.hass.io:8927/sendspin`).
+
 ## Example Configuration
 
 ```yaml
@@ -42,13 +53,13 @@ log_level: info
 bridges:
   - id: kitchen
     name: Kitchen
-    url: ws://music-assistant.local:8927/sendspin
+    url: ws://127.0.0.1:8927/sendspin
     buffer_ms: 5
     process_id: 1
     alt_port: 14000
   - id: livingroom
     name: Living Room
-    url: ws://music-assistant.local:8927/sendspin
+    url: ws://127.0.0.1:8927/sendspin
     buffer_ms: 5
     process_id: 2
     alt_port: 14010
