@@ -4,6 +4,9 @@ set -euo pipefail
 CLOCK_PATH="$(bashio::config 'clock_path')"
 WAIT_FOR_CLOCK_SECONDS="$(bashio::config 'wait_for_clock_seconds')"
 LOG_LEVEL="$(bashio::config 'log_level')"
+DRIFT_THRESHOLD_MS="$(bashio::config 'drift_threshold_ms')"
+DRIFT_CHECK_INTERVAL_MS="$(bashio::config 'drift_check_interval_ms')"
+MAX_CORRECTION_SAMPLES_PER_TICK="$(bashio::config 'max_correction_samples_per_tick')"
 OPTIONS_FILE=/data/options.json
 
 if [[ ! -f "$OPTIONS_FILE" ]]; then
@@ -25,6 +28,7 @@ export INFERNO_RX_CHANNELS="0"
 declare -A IDS=()
 declare -A PROCESS_IDS=()
 declare -A ALT_PORTS=()
+declare -A BUFFER_VALUES=()
 declare -a ALT_PORT_VALUES=()
 declare -a PIDS=()
 
@@ -33,6 +37,7 @@ for ((i = 0; i < BRIDGE_COUNT; i++)); do
     name="$(jq -r ".bridges[$i].name" "$OPTIONS_FILE")"
     process_id="$(jq -r ".bridges[$i].process_id" "$OPTIONS_FILE")"
     alt_port="$(jq -r ".bridges[$i].alt_port" "$OPTIONS_FILE")"
+    buffer_ms="$(jq -r ".bridges[$i].buffer_ms" "$OPTIONS_FILE")"
 
     if [[ -n "${IDS[$id]:-}" ]]; then
         bashio::log.fatal "Duplicate bridge id: $id"
@@ -63,8 +68,13 @@ for ((i = 0; i < BRIDGE_COUNT; i++)); do
         fi
     done
     ALT_PORT_VALUES+=("$alt_port")
+    BUFFER_VALUES[$buffer_ms]=1
 
 done
+
+if (( ${#BUFFER_VALUES[@]} > 1 )); then
+    bashio::log.warning "Mixed buffer_ms values detected across bridges. buffer_ms is real playout latency, not just jitter tolerance, so bridges with different values will not stay sample-aligned."
+fi
 
 if (( WAIT_FOR_CLOCK_SECONDS > 0 )); then
     bashio::log.info "Waiting for clock socket at $CLOCK_PATH"
@@ -109,7 +119,10 @@ for ((i = 0; i < BRIDGE_COUNT; i++)); do
     /usr/local/bin/spin2dante \
         --url "$url" \
         --name "$name" \
-        --buffer-ms "$buffer_ms" &
+        --buffer-ms "$buffer_ms" \
+        --drift-threshold-ms "$DRIFT_THRESHOLD_MS" \
+        --drift-check-interval-ms "$DRIFT_CHECK_INTERVAL_MS" \
+        --max-correction-samples-per-tick "$MAX_CORRECTION_SAMPLES_PER_TICK" &
 
     PIDS+=("$!")
 done

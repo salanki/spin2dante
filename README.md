@@ -128,8 +128,41 @@ Each bridge instance is configured via CLI arguments and environment variables.
 |----------|---------|-------------|
 | `--url` / `-u` | (required) | Sendspin server WebSocket URL |
 | `--name` / `-n` | "Sendspin Bridge" | DANTE device name visible on the network |
-| `--buffer-ms` | 5 | Jitter buffer size in milliseconds |
+| `--buffer-ms` | 5 | Playout buffer / latency in milliseconds. Larger values improve jitter tolerance, but they also add the same amount of audio delay. |
+| `--drift-threshold-ms` | 5 | Drift threshold in milliseconds before an in-place anchor correction is applied. |
+| `--drift-check-interval-ms` | 1000 | How often to sample drift between the Sendspin and PTP timelines. |
+| `--max-correction-samples-per-tick` | 48 | Maximum anchor shift applied in one drift-correction tick. |
 | `--client-id` | Derived from name | Stable Sendspin/Music Assistant player identity |
+
+Bridges that should stay sample-aligned with each other should use the same
+`--buffer-ms` value.
+
+Bridges that share the same Sendspin timeline and PTP clock will stay tightly
+synced even at higher buffer values such as `100ms`, as long as they all use
+the same `--buffer-ms` setting. Increasing `--buffer-ms` raises latency for the
+whole sync group, but does not by itself create an offset within that group.
+
+For same-host deployments where Sendspin and `spin2dante` run on the same
+machine, values as low as `1ms` can work well because the bridge sees very
+little upstream jitter. For general deployments, especially when Sendspin is
+remote, `5ms` remains the recommended default.
+
+### Clock Drift Correction
+
+Once a bridge is running, it periodically samples the DANTE read position and
+the Sendspin server clock. If drift grows beyond `--drift-threshold-ms`, the
+bridge shifts its scheduler anchor in place instead of rebuffering, capped by
+`--max-correction-samples-per-tick` each check. This keeps long-running bridges
+aligned without introducing a prebuffer-sized audible gap.
+
+By default, drift is checked every second and corrected once it exceeds `5ms`.
+Large anomalies still fall back to a full rebuffer for safety.
+
+Keep `--max-correction-samples-per-tick` conservative. The default `48`
+samples is about `1ms` at 48kHz and is intended to stay comfortably below the
+"backward target" rebuffer path. Values above roughly `100` samples increase
+the chance that a single correction could force a full rebuffer when chunks are
+small.
 
 ### Environment Variables
 
@@ -294,7 +327,7 @@ The bridge logs periodic metrics every 5 seconds. Two log lines are emitted: syn
 | Metric | Meaning |
 |--------|---------|
 | `fill` | Samples buffered (write position - read position) |
-| `target` | Configured buffer target (`--buffer-ms` converted to samples) |
+| `target` | Configured playout delay target (`--buffer-ms` converted to samples) |
 | `drift` | Estimated clock drift between Sendspin and PTP in ppm |
 
 During PTP clock warmup, the buffer line shows:

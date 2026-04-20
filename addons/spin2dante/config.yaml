@@ -31,6 +31,9 @@ options:
   clock_path: "/share/usrvclock"
   wait_for_clock_seconds: 30
   log_level: "info"
+  drift_threshold_ms: 5
+  drift_check_interval_ms: 1000
+  max_correction_samples_per_tick: 48
   bridges:
     - id: kitchen
       name: Kitchen
@@ -48,6 +51,9 @@ schema:
   clock_path: str
   wait_for_clock_seconds: int(0,300)
   log_level: list(trace|debug|info|warn|error)
+  drift_threshold_ms: int(0,250)
+  drift_check_interval_ms: int(100,10000)
+  max_correction_samples_per_tick: int(1,120)
   bridges:
     - id: match(^[a-z0-9][a-z0-9_-]*$)
       name: str

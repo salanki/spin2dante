@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
@@ -24,6 +25,24 @@ const MAX_PENDING_CHUNKS: usize = 200; // ~5s at 25 frames/chunk — bounds RAM 
 
 fn wrapsub(a: usize, b: usize) -> isize {
     (a as isize).wrapping_sub(b as isize)
+}
+
+fn ms_to_samples(ms: u32) -> usize {
+    (SAMPLE_RATE as usize * ms as usize) / 1000
+}
+
+fn micros_to_samples(delta_us: i64) -> isize {
+    (delta_us * SAMPLE_RATE as i64 / 1_000_000) as isize
+}
+
+fn expected_read_pos(anchor_ring_pos: usize, prebuffer_target: usize, elapsed_us: i64) -> usize {
+    anchor_ring_pos
+        .wrapping_sub(prebuffer_target)
+        .wrapping_add_signed(micros_to_samples(elapsed_us))
+}
+
+fn clamp_signed_magnitude(value: isize, max_magnitude: usize) -> isize {
+    value.clamp(-(max_magnitude as isize), max_magnitude as isize)
 }
 
 // ─── Bridge state machine ───────────────────────────────────────────
@@ -62,6 +81,9 @@ pub struct SendspinBridge {
     device_name: String,
     client_id: String,
     buffer_ms: u32,
+    drift_threshold_samples: usize,
+    drift_check_interval: Duration,
+    max_correction_samples: usize,
     state: BridgeState,
     // Device + TX state (persistent for process lifetime)
     rb_inputs: Option<Vec<RBInput<Sample, OwnedBuffer<Atomic<Sample>>>>>,
@@ -84,22 +106,37 @@ pub struct SendspinBridge {
     // All targets computed relative to this anchor for stable spacing.
     anchor_server_us: Option<i64>,
     anchor_ring_pos: Option<usize>,
+    anchor_set_at: Option<Instant>,
     // Scheduler counters
     stale_drops: u64,
     trimmed_chunks: u64,
     trimmed_frames: u64,
     queued_high_water: usize,
     scheduler_settled: bool,
+    drift_corrections: u64,
+    rebuffers: u64,
+    drift_checks_skipped: u64,
 }
 
 impl SendspinBridge {
-    pub fn new(url: String, device_name: String, buffer_ms: u32, client_id: String) -> Self {
-        let prebuffer_target = (SAMPLE_RATE as usize * buffer_ms as usize) / 1000;
+    pub fn new(
+        url: String,
+        device_name: String,
+        buffer_ms: u32,
+        drift_threshold_ms: u32,
+        drift_check_interval_ms: u64,
+        max_correction_samples_per_tick: usize,
+        client_id: String,
+    ) -> Self {
+        let prebuffer_target = ms_to_samples(buffer_ms);
         Self {
             url,
             device_name,
             client_id,
             buffer_ms,
+            drift_threshold_samples: ms_to_samples(drift_threshold_ms),
+            drift_check_interval: Duration::from_millis(drift_check_interval_ms),
+            max_correction_samples: max_correction_samples_per_tick,
             state: BridgeState::Idle,
             rb_inputs: None,
             device_server: None,
@@ -117,11 +154,15 @@ impl SendspinBridge {
             pending_chunks: VecDeque::new(),
             anchor_server_us: None,
             anchor_ring_pos: None,
+            anchor_set_at: None,
             stale_drops: 0,
             trimmed_chunks: 0,
             trimmed_frames: 0,
             queued_high_water: 0,
             scheduler_settled: false,
+            drift_corrections: 0,
+            rebuffers: 0,
+            drift_checks_skipped: 0,
         }
     }
 
@@ -238,6 +279,7 @@ impl SendspinBridge {
 
         let mut metrics_interval =
             tokio::time::interval(std::time::Duration::from_secs(METRICS_INTERVAL_SECS));
+        let mut drift_interval = tokio::time::interval(self.drift_check_interval);
 
         loop {
             tokio::select! {
@@ -255,6 +297,9 @@ impl SendspinBridge {
                 }
                 _ = metrics_interval.tick() => {
                     self.log_metrics();
+                }
+                _ = drift_interval.tick() => {
+                    self.check_drift();
                 }
                 _ = tokio::signal::ctrl_c() => {
                     info!("shutting down");
@@ -398,11 +443,70 @@ impl SendspinBridge {
         self.pending_chunks.clear();
         self.anchor_server_us = None;
         self.anchor_ring_pos = None;
+        self.anchor_set_at = None;
         self.stale_drops = 0;
         self.trimmed_chunks = 0;
         self.trimmed_frames = 0;
         self.queued_high_water = 0;
         self.scheduler_settled = false;
+    }
+
+    fn count_rebuffer_if_running_anchored(&mut self) {
+        if self.state == BridgeState::Running && self.anchor_server_us.is_some() {
+            self.rebuffers += 1;
+        }
+    }
+
+    fn check_drift(&mut self) {
+        let (anchor_us, anchor_pos, anchor_set_at) = match (
+            self.anchor_server_us,
+            self.anchor_ring_pos,
+            self.anchor_set_at,
+        ) {
+            (Some(anchor_us), Some(anchor_pos), Some(anchor_set_at)) => {
+                (anchor_us, anchor_pos, anchor_set_at)
+            }
+            _ => return,
+        };
+
+        if anchor_set_at.elapsed() < Duration::from_secs(10) {
+            return;
+        }
+
+        let Some((actual_read_pos, server_now_us)) = self.get_synced_pair() else {
+            self.drift_checks_skipped += 1;
+            return;
+        };
+
+        let elapsed_us = server_now_us - anchor_us;
+        let expected_read_pos = expected_read_pos(anchor_pos, self.prebuffer_target, elapsed_us);
+        let drift_samples = wrapsub(actual_read_pos, expected_read_pos);
+
+        if drift_samples.abs() > (RING_BUFFER_SIZE / 4) as isize {
+            warn!(
+                "drift anomaly: drift={} samples actual_read_pos={} expected_read_pos={}, rebuffering",
+                drift_samples, actual_read_pos, expected_read_pos
+            );
+            self.count_rebuffer_if_running_anchored();
+            self.clear_and_rebuffer();
+            return;
+        }
+
+        if drift_samples.abs() as usize > self.drift_threshold_samples {
+            let correction = clamp_signed_magnitude(drift_samples, self.max_correction_samples);
+            let new_anchor_pos = anchor_pos.wrapping_add_signed(correction);
+            self.anchor_ring_pos = Some(new_anchor_pos);
+            self.drift_corrections += 1;
+            info!(
+                "drift correction: drift={} samples applied={} new_anchor_ring_pos={} total={}",
+                drift_samples, correction, new_anchor_pos, self.drift_corrections
+            );
+        } else {
+            debug!(
+                "drift within threshold: drift={} samples threshold={} actual_read_pos={} expected_read_pos={}",
+                drift_samples, self.drift_threshold_samples, actual_read_pos, expected_read_pos
+            );
+        }
     }
 
     // ─── State transitions ──────────────────────────────────────────
@@ -498,6 +602,7 @@ impl SendspinBridge {
                     "write/read misalignment (write={}, read={}, dist={}), snapping",
                     self.write_pos, read_pos, distance
                 );
+                self.count_rebuffer_if_running_anchored();
                 self.snap_to_live();
                 self.reset_scheduler();
             }
@@ -568,6 +673,7 @@ impl SendspinBridge {
                     let ring_pos = snap_read_pos.wrapping_add(self.prebuffer_target);
                     self.anchor_server_us = Some(snap_server_us);
                     self.anchor_ring_pos = Some(ring_pos);
+                    self.anchor_set_at = Some(Instant::now());
                     let sync_key = ring_pos.wrapping_sub(
                         (snap_server_us as u128 * SAMPLE_RATE as u128 / 1_000_000) as usize,
                     );
@@ -660,6 +766,7 @@ impl SendspinBridge {
                         "discontinuity (target={}, write_pos={}, settled={}), snapping",
                         target, self.write_pos, self.scheduler_settled
                     );
+                    self.count_rebuffer_if_running_anchored();
                     self.snap_to_live();
                     self.reset_scheduler();
                     break;
@@ -678,6 +785,7 @@ impl SendspinBridge {
                     "significant backward target: target={} behind write_pos={} by {} samples, rebuffering (dropping {} queued chunks)",
                     target, self.write_pos, backward, self.pending_chunks.len()
                 );
+                self.count_rebuffer_if_running_anchored();
                 self.clear_and_rebuffer();
                 break;
             } else if backward > 0 {
@@ -796,13 +904,16 @@ impl SendspinBridge {
                     "sequential"
                 };
                 info!(
-                    "[sync] mode={} pending={} stale_drops={} trims={}/{} high_water={}",
+                    "[sync] mode={} pending={} stale_drops={} trims={}/{} high_water={} drift_corrections={} rebuffers={} drift_checks_skipped={}",
                     mode,
                     self.pending_chunks.len(),
                     self.stale_drops,
                     self.trimmed_chunks,
                     self.trimmed_frames,
                     self.queued_high_water,
+                    self.drift_corrections,
+                    self.rebuffers,
+                    self.drift_checks_skipped,
                 );
                 self.metrics.log(self.write_pos, self.get_read_pos());
             }
@@ -819,5 +930,51 @@ impl SendspinBridge {
         self.rb_inputs = None;
         self.state = BridgeState::Idle;
         info!("bridge shutdown complete");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expected_read_pos_tracks_elapsed_server_time() {
+        let anchor_ring_pos = 10_000usize;
+        let prebuffer_target = ms_to_samples(5);
+        let expected = expected_read_pos(anchor_ring_pos, prebuffer_target, 1_000_000);
+        assert_eq!(
+            expected,
+            anchor_ring_pos
+                .wrapping_sub(prebuffer_target)
+                .wrapping_add(SAMPLE_RATE as usize)
+        );
+    }
+
+    #[test]
+    fn positive_drift_delays_future_chunks() {
+        let anchor_ring_pos = 1_000usize;
+        let prebuffer_target = ms_to_samples(5);
+        let expected = expected_read_pos(anchor_ring_pos, prebuffer_target, 0);
+        let actual = expected.wrapping_add(120);
+        let drift_samples = wrapsub(actual, expected);
+        let correction = clamp_signed_magnitude(drift_samples, 48);
+
+        assert_eq!(drift_samples, 120);
+        assert_eq!(correction, 48);
+        assert_eq!(anchor_ring_pos.wrapping_add_signed(correction), 1_048usize);
+    }
+
+    #[test]
+    fn negative_drift_pulls_future_chunks_forward() {
+        let anchor_ring_pos = 1_000usize;
+        let prebuffer_target = ms_to_samples(5);
+        let expected = expected_read_pos(anchor_ring_pos, prebuffer_target, 0);
+        let actual = expected.wrapping_sub(120);
+        let drift_samples = wrapsub(actual, expected);
+        let correction = clamp_signed_magnitude(drift_samples, 48);
+
+        assert_eq!(drift_samples, -120);
+        assert_eq!(correction, -48);
+        assert_eq!(anchor_ring_pos.wrapping_add_signed(correction), 952usize);
     }
 }

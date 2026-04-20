@@ -8,6 +8,15 @@ configuration:
   log_level:
     name: Log level
     description: Verbosity of add-on logs.
+  drift_threshold_ms:
+    name: Drift threshold
+    description: Drift in milliseconds before the bridge applies an in-place anchor correction.
+  drift_check_interval_ms:
+    name: Drift check interval
+    description: How often, in milliseconds, the bridge samples drift between the Sendspin and PTP timelines.
+  max_correction_samples_per_tick:
+    name: Max correction per tick
+    description: Maximum anchor shift, in samples, that can be applied in one drift-correction tick.
   bridges:
     name: Bridges
     description: List of Sendspin-to-DANTE bridge definitions.
