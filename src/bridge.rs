@@ -193,6 +193,13 @@ impl SendspinBridge {
         let mut settings = Settings::new(&self.device_name, &short_name, None, &config);
         settings.make_tx_channels(CHANNELS);
         settings.make_rx_channels(0);
+        // Sendspin sends interleaved stereo PCM (ch0=Left, ch1=Right).
+        for (idx, name) in ["Left", "Right"].iter().enumerate() {
+            *settings.self_info.tx_channels[idx]
+                .friendly_name
+                .write()
+                .unwrap() = (*name).to_string();
+        }
 
         info!(
             "starting DANTE device: {} (waiting for PTP clock...)",
