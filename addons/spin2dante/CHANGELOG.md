@@ -1,5 +1,10 @@
 # Changelog
 
+## sha-c5899ed — 2026-04-20
+
+### Changed
+- DANTE TX channels now advertise as "Left" and "Right" instead of generic "TX 1" / "TX 2". Manual renames via Dante Controller still persist and take precedence.
+
 ## sha-904a789 — 2026-04-19
 
 ### Added
