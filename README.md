@@ -1,5 +1,7 @@
 # spin2dante
 
+![spin2dante logo](docs/assets/spin2dante-logo.png)
+
 > **Note**
 > This project is experimental. It has been validated with real DANTE hardware
 > running as a Home Assistant add-on, and with Music Assistant grouped playback
@@ -368,6 +370,8 @@ This project builds on the work of several open source projects:
 Dante uses technology patented by [Audinate](https://www.audinate.com/). This source code may use these patents too. Consult a lawyer if you want to make money from it or distribute binaries in a region where software patents apply.
 
 This project makes no claim to be either authorized or approved by Audinate. The DANTE protocol implementation is provided by [Inferno](https://gitlab.com/lumifaza/inferno), an unofficial and independent implementation.
+
+Dante is a trademark of Audinate Pty Ltd.
 
 ## License
 
