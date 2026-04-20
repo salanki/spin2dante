@@ -1,6 +1,10 @@
 # spin2dante
 
-![spin2dante logo](docs/assets/spin2dante-logo.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/spin2dante-logo-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/assets/spin2dante-logo-light.png">
+  <img alt="spin2dante logo" src="docs/assets/spin2dante-logo-light.png">
+</picture>
 
 > **Note**
 > This project is experimental. It has been validated with real DANTE hardware
