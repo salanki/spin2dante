@@ -11,6 +11,10 @@ ENV RUSTFLAGS="-C target-feature=-crt-static"
 RUN cargo build --release -p statime-linux 2>&1
 
 FROM alpine:3
+LABEL \
+  org.opencontainers.image.source="https://github.com/salanki/spin2dante" \
+  org.opencontainers.image.description="PTP daemon image for exporting a usrvclock socket for spin2dante and inferno-based Dante tools." \
+  org.opencontainers.image.licenses="GPL-3.0-or-later OR AGPL-3.0-or-later"
 RUN apk add --no-cache libgcc
 COPY --from=builder /build/target/release/statime /usr/local/bin/statime
 COPY entrypoint.sh /entrypoint.sh

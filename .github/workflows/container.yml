@@ -89,3 +89,18 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.image_name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image_name }}
+
+      - name: Verify package is anonymously pullable
+        if: github.event_name != 'pull_request'
+        env:
+          IMAGE_NAME: ${{ matrix.image_name }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          response="$(curl -fsSL "https://ghcr.io/token?service=ghcr.io&scope=repository:${OWNER}/${IMAGE_NAME}:pull")"
+          if ! echo "$response" | grep -q '"token"'; then
+            echo "GHCR package ghcr.io/${OWNER}/${IMAGE_NAME} is not anonymously pullable."
+            echo "Make the package public in GitHub Packages so Home Assistant can download it."
+            echo "Token response: $response"
+            exit 1
+          fi

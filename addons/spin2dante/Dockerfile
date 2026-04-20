@@ -16,7 +16,10 @@ LABEL \
   io.hass.arch="aarch64|amd64" \
   io.hass.name="spin2dante" \
   io.hass.description="Bit-perfect bridge of one or more Sendspin audio streams to Audinate DANTE channels." \
-  io.hass.url="https://github.com/salanki/spin2dante"
+  io.hass.url="https://github.com/salanki/spin2dante" \
+  org.opencontainers.image.source="https://github.com/salanki/spin2dante" \
+  org.opencontainers.image.description="Home Assistant add-on for bridging Sendspin audio streams to Audinate DANTE channels." \
+  org.opencontainers.image.licenses="GPL-3.0-or-later OR AGPL-3.0-or-later"
 RUN apk add --no-cache alsa-lib jq libgcc
 COPY --from=builder /build/target/release/spin2dante /usr/local/bin/spin2dante
 COPY addons/spin2dante/run.sh /run.sh
