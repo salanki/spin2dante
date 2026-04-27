@@ -1,5 +1,14 @@
 # Changelog
 
+## sha-aa6fc63 — 2026-04-27
+
+### Added
+- Optional bridge-side software volume control (`volume_control: bridge`). When enabled, the bridge advertises volume/mute support to Music Assistant and applies click-free 20ms-ramped gain to decoded PCM before writing to the DANTE ring. 100% volume is a true no-op (bit-perfect).
+- Optional DANTE subscriber state reporting (`report_dante_subscriber: true`). When enabled and no DANTE receiver is subscribed, the bridge reports `ExternalSource` to Music Assistant so it gracefully removes the player from its group (other members keep playing). Once a receiver subscribes, the player can rejoin.
+
+### Changed
+- Upgraded sendspin dependency from 0.1.2 to 0.2.0 for GainControl support.
+
 ## sha-c5899ed — 2026-04-20
 
 ### Changed
