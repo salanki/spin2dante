@@ -20,3 +20,8 @@ configuration:
   bridges:
     name: Bridges
     description: List of Sendspin-to-DANTE bridge definitions.
+  volume_control:
+    name: Volume control
+    description: >-
+      "none" (default) for transparent passthrough, or "bridge" to enable
+      software volume/mute control from Music Assistant.

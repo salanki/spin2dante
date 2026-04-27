@@ -177,7 +177,27 @@ This is an implementation choice, not a fundamental architectural limit. Support
 
 ## Player Capabilities
 
-The bridge advertises itself as a Sendspin player with no volume or mute support (`supported_commands: []`). It is a transparent passthrough — audio is delivered to DANTE exactly as the server sends it, with no gain processing. Volume control is expected to happen upstream (in Music Assistant) or downstream (on the DANTE receiver/amplifier).
+By default, the bridge advertises `supported_commands: []` and is a transparent passthrough — audio is delivered to DANTE exactly as the server sends it, with no gain processing.
+
+When `--volume-control=bridge` is enabled, the bridge advertises `supported_commands: ["volume", "mute"]` and applies software gain to the decoded PCM stream before writing to the DANTE ring buffer.
+
+### Bridge-Side Gain Architecture
+
+```
+decode_pcm() → PendingChunk queue → BridgeGainRamp.apply() → RBInput ring buffer → DANTE TX
+                                    ^^^^^^^^^^^^^^^^^^^^
+                                    gain stage (when enabled)
+```
+
+Components:
+- **`GainControl`** (from sendspin crate): Thread-safe atomic state for volume (0–100, perceptual 1.5-power curve) and mute. Provides `gain() -> f32` (0.0–1.0 linear).
+- **`BridgeGainRamp`** (in `src/gain.rs`): Per-frame gain ramping (20ms at 48kHz = 960 frames) adapted for per-channel `Vec<Sample>` (i32). Prevents clicks on volume changes. Uses f64 intermediate for sample multiplication to preserve 24-bit precision.
+
+The gain is applied after scheduling (after the anchor/drift-correction layer decides where to place each chunk) and before the ring buffer write. Drift correction operates on timing/positions, not sample values, so gain is completely orthogonal.
+
+At 100% volume with mute off, the gain path is a true no-op: `ramp_frames_remaining == 0 && current_gain == 1.0` returns immediately without touching any samples. This preserves bit-perfect transport.
+
+The gain ramp state is reset on stream transitions (StreamStart, StreamEnd, StreamClear, reconnection) to avoid carrying stale ramp state into new audio.
 
 ## Multi-Stream Deployment
 

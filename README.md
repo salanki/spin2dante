@@ -139,6 +139,7 @@ Each bridge instance is configured via CLI arguments and environment variables.
 | `--drift-check-interval-ms` | 1000 | How often to sample drift between the Sendspin and PTP timelines. |
 | `--max-correction-samples-per-tick` | 48 | Maximum anchor shift applied in one drift-correction tick. |
 | `--client-id` | Derived from name | Stable Sendspin/Music Assistant player identity |
+| `--volume-control` | none | Volume control mode: `none` (default, passthrough) or `bridge` (software gain applied inside the bridge). See [Volume Control](#volume-control) below. |
 
 Bridges that should stay sample-aligned with each other should use the same
 `--buffer-ms` value.
@@ -169,6 +170,19 @@ samples is about `1ms` at 48kHz and is intended to stay comfortably below the
 "backward target" rebuffer path. Values above roughly `100` samples increase
 the chance that a single correction could force a full rebuffer when chunks are
 small.
+
+### Volume Control
+
+By default, spin2dante is a transparent bit-perfect passthrough — it advertises no volume or mute capability, and Music Assistant hides the volume slider.
+
+When `--volume-control=bridge` is enabled:
+- The bridge advertises volume and mute support to Music Assistant
+- MA shows the normal volume slider and mute toggle
+- Volume/mute commands are applied as software gain to the decoded audio stream before writing into the DANTE TX ring
+
+**100% volume is bit-perfect.** At full volume with mute off, the gain path is a true no-op — no float math, no sample modification, no rounding. The bridge preserves identical output to `--volume-control=none`.
+
+Volume changes use a 20ms per-frame ramp to prevent audible clicks. The perceptual curve follows sendspin's model: `gain = (volume / 100)^1.5`, so 50% volume feels like "half volume" rather than half amplitude.
 
 ### Environment Variables
 

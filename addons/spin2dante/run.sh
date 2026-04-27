@@ -111,7 +111,9 @@ for ((i = 0; i < BRIDGE_COUNT; i++)); do
 
     mkdir -p "$tmpdir"
 
-    bashio::log.info "Starting bridge '$id' (${name}) on alt_port=${alt_port}, process_id=${process_id}"
+    volume_control="$(jq -r ".bridges[$i].volume_control // \"none\"" "$OPTIONS_FILE")"
+
+    bashio::log.info "Starting bridge '$id' (${name}) on alt_port=${alt_port}, process_id=${process_id}, volume_control=${volume_control}"
     HOME="/data" \
     TMPDIR="$tmpdir" \
     INFERNO_PROCESS_ID="$process_id" \
@@ -122,7 +124,8 @@ for ((i = 0; i < BRIDGE_COUNT; i++)); do
         --buffer-ms "$buffer_ms" \
         --drift-threshold-ms "$DRIFT_THRESHOLD_MS" \
         --drift-check-interval-ms "$DRIFT_CHECK_INTERVAL_MS" \
-        --max-correction-samples-per-tick "$MAX_CORRECTION_SAMPLES_PER_TICK" &
+        --max-correction-samples-per-tick "$MAX_CORRECTION_SAMPLES_PER_TICK" \
+        --volume-control "$volume_control" &
 
     PIDS+=("$!")
 done

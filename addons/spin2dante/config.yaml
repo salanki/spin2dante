@@ -39,12 +39,14 @@ options:
       name: Kitchen
       url: "ws://127.0.0.1:8927/sendspin"
       buffer_ms: 5
+      volume_control: "none"
       process_id: 1
       alt_port: 14000
     - id: livingroom
       name: "Living Room"
       url: "ws://127.0.0.1:8927/sendspin"
       buffer_ms: 5
+      volume_control: "none"
       process_id: 2
       alt_port: 14010
 schema:
@@ -59,5 +61,6 @@ schema:
       name: str
       url: str
       buffer_ms: int(1,5000)
+      volume_control: list(none|bridge)?
       process_id: int(1,65535)
       alt_port: int(1024,65532)

@@ -33,6 +33,7 @@ Each bridge entry contains:
 - `name`: DANTE device name to advertise
 - `url`: Sendspin WebSocket URL
 - `buffer_ms`: Playout buffer / latency in milliseconds. Larger values improve jitter tolerance, but they also delay audio by that amount.
+- `volume_control`: Volume control mode — `none` (default, passthrough) or `bridge` (software gain). See [Volume Control](#volume-control) below.
 - `process_id`: Unique Inferno process ID on the host IP
 - `alt_port`: Unique Inferno base UDP port, spaced at least 10 apart from other bridges
 
@@ -61,12 +62,14 @@ bridges:
     name: Kitchen
     url: ws://127.0.0.1:8927/sendspin
     buffer_ms: 5
+    volume_control: none
     process_id: 1
     alt_port: 14000
   - id: livingroom
     name: Living Room
     url: ws://127.0.0.1:8927/sendspin
     buffer_ms: 5
+    volume_control: bridge
     process_id: 2
     alt_port: 14010
 ```
@@ -84,6 +87,25 @@ If Sendspin and `spin2dante` run on the same host, values as low as `1ms` can
 work well because there is very little upstream jitter between the source and
 the bridge. For more general deployments, especially when Sendspin is remote,
 `5ms` remains the recommended default.
+
+## Volume Control
+
+When a DANTE zone does not expose controllable volume through Home Assistant or
+the downstream amplifier, you can enable bridge-side software volume control as
+a fallback. Set `volume_control: bridge` on the bridge entry.
+
+When enabled:
+- Music Assistant shows a volume slider and mute toggle for that player
+- Volume and mute commands are applied as software gain inside the bridge
+- At 100% volume with mute off, audio is bit-perfect (true no-op)
+- Volume changes use a smooth 20ms ramp to prevent clicks
+
+When set to `none` (the default), the bridge is a transparent passthrough with
+no volume capability advertised. This is the right choice when volume is
+controlled by the amplifier or via Home Assistant.
+
+Each bridge has independent volume state. You can enable `bridge` on zones that
+need it and leave `none` on zones where the amplifier handles volume.
 
 ## Clock Drift Correction
 

@@ -1,0 +1,7 @@
+FROM python:3.13-alpine
+RUN apk add --no-cache build-base git linux-headers
+RUN pip install --no-cache-dir netaudio
+COPY validate.py /validate.py
+COPY validate.sh /validate.sh
+RUN chmod +x /validate.sh
+ENTRYPOINT ["/validate.sh"]

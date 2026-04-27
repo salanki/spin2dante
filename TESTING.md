@@ -69,6 +69,9 @@ make test-multi
 # Sync verification (2 bridges → 1 shared receiver, 4 channels)
 make test-sync-verify
 
+# Volume control E2E test (verify gain at 50% reduces amplitude)
+make test-volume
+
 # Interactive Music Assistant test (2 bridges, manual playback)
 make test-ma-interactive
 
@@ -425,6 +428,35 @@ The bridge starts writing at local-domain position 0. When the PTP clock warms u
 ### Timing notes
 
 The follower needs ~10-15s to sync with the master and start exporting overlays. The bridge auto-realigns once the clock becomes available — no manual timing coordination needed.
+
+## Volume Control Test (`make test-volume`)
+
+Validates that `--volume-control=bridge` actually applies gain to captured audio. Uses a custom Sendspin test server that streams a constant-amplitude 1kHz sine tone, sends a `volume=50` command mid-stream, and continues streaming.
+
+### What it does
+
+- Custom test server sends 15s of audio at full volume, then a `server/command` with `volume=50`, then 25s more audio
+- Bridge runs with `--volume-control=bridge`
+- i2pipe captures the DANTE output
+- Validator measures RMS amplitude in early vs late capture windows
+
+### Pass criteria
+
+- Bridge logs confirm volume command was received
+- RMS amplitude in the post-command window is at least 6 dB lower than the pre-command window
+
+### Typical result
+
+```
+RMS before: 2163279.4
+RMS after:  1052936.6
+Reduction: 6.3 dB
+PASS: volume at 50% reduced amplitude by 6.3 dB
+```
+
+### Note on the single-stream test
+
+The single-stream E2E test (`make test`) also runs with `--volume-control=bridge` at the default 100% volume. This verifies that enabling bridge volume control at unity gain remains bit-perfect.
 
 ## Edge Case Behavior
 

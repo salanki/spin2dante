@@ -9,12 +9,14 @@ use atomic::Atomic;
 use inferno_aoip::device_server::{DeviceServer, OwnedBuffer, RBInput, ReadPositionSnapshot, Sample, Settings};
 use log::{debug, error, info, warn};
 use sendspin::protocol::client::{AudioChunk, Connection};
-use sendspin::protocol::messages::{AudioFormatSpec, Message, PlayerV1Support};
+use sendspin::protocol::messages::{AudioFormatSpec, Message, PlayerCommandType, PlayerV1Support};
 use sendspin::sync::clock::ClockSync;
-use sendspin::ProtocolClientBuilder;
+use sendspin::{GainControl, ProtocolClientBuilder};
 use tokio::sync::oneshot;
 
+use crate::gain::BridgeGainRamp;
 use crate::metrics::BufferMetrics;
+use crate::VolumeControlMode;
 
 pub const CHANNELS: usize = 2;
 pub const RING_BUFFER_SIZE: usize = 16384; // ~341ms at 48kHz, power of 2
@@ -116,6 +118,9 @@ pub struct SendspinBridge {
     drift_corrections: u64,
     rebuffers: u64,
     drift_checks_skipped: u64,
+    // Volume control
+    gain_control: Option<GainControl>,
+    gain_ramp: BridgeGainRamp,
 }
 
 impl SendspinBridge {
@@ -127,8 +132,14 @@ impl SendspinBridge {
         drift_check_interval_ms: u64,
         max_correction_samples_per_tick: usize,
         client_id: String,
+        volume_control: VolumeControlMode,
     ) -> Self {
         let prebuffer_target = ms_to_samples(buffer_ms);
+        let gain_control = if volume_control == VolumeControlMode::Bridge {
+            Some(GainControl::new(100, false))
+        } else {
+            None
+        };
         Self {
             url,
             device_name,
@@ -163,6 +174,8 @@ impl SendspinBridge {
             drift_corrections: 0,
             rebuffers: 0,
             drift_checks_skipped: 0,
+            gain_control,
+            gain_ramp: BridgeGainRamp::new(),
         }
     }
 
@@ -258,7 +271,11 @@ impl SendspinBridge {
                     },
                 ],
                 buffer_capacity: (SAMPLE_RATE as u32 * CHANNELS as u32 * 3 / 5), // ~200ms stereo 24-bit
-                supported_commands: vec![],
+                supported_commands: if self.gain_control.is_some() {
+                    vec!["volume".to_string(), "mute".to_string()]
+                } else {
+                    vec![]
+                },
             };
             match ProtocolClientBuilder::builder()
                 .client_id(self.client_id.clone())
@@ -401,6 +418,25 @@ impl SendspinBridge {
                 info!("stream cleared, discarding buffered audio");
                 self.clear_and_rebuffer();
             }
+            Message::ServerCommand(cmd) => {
+                if let (Some(gc), Some(player_cmd)) = (&self.gain_control, cmd.player) {
+                    match player_cmd.command {
+                        PlayerCommandType::Volume => {
+                            if let Some(vol) = player_cmd.volume {
+                                gc.set_volume(vol);
+                                info!("bridge volume set to {}", vol);
+                            }
+                        }
+                        PlayerCommandType::Mute => {
+                            if let Some(muted) = player_cmd.mute {
+                                gc.set_mute(muted);
+                                info!("bridge mute set to {}", muted);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
             _ => {
                 debug!("unhandled message type");
             }
@@ -462,6 +498,7 @@ impl SendspinBridge {
         self.trimmed_frames = 0;
         self.queued_high_water = 0;
         self.scheduler_settled = false;
+        self.gain_ramp.reset_to_current();
     }
 
     fn count_rebuffer_if_running_anchored(&mut self) {
@@ -629,6 +666,10 @@ impl SendspinBridge {
         });
         while self.pending_chunks.len() > MAX_PENDING_CHUNKS {
             self.stale_drops += 1;
+            if let Some(gc) = &self.gain_control {
+                let dropped = self.pending_chunks.front().unwrap();
+                self.gain_ramp.advance(dropped.frames, gc.gain());
+            }
             self.pending_chunks.pop_front();
         }
         if self.pending_chunks.len() > self.queued_high_water {
@@ -733,6 +774,9 @@ impl SendspinBridge {
             // Entirely stale: chunk_end behind read_pos
             if wrapsub(chunk_end, read_pos) <= 0 {
                 self.stale_drops += 1;
+                if let Some(gc) = &self.gain_control {
+                    self.gain_ramp.advance(chunk.frames, gc.gain());
+                }
                 debug!(
                     "dropped stale chunk: ts={}, target={}, read_pos={}",
                     chunk.timestamp_us, target, read_pos
@@ -751,8 +795,8 @@ impl SendspinBridge {
                     "trimming {} stale samples, writing {} at read_pos={}",
                     trim, remaining, read_pos
                 );
-                let chunk = self.pending_chunks.pop_front().unwrap();
-                self.write_trimmed_samples(&chunk.channel_samples, trim, remaining, read_pos);
+                let mut chunk = self.pending_chunks.pop_front().unwrap();
+                self.write_trimmed_samples(&mut chunk.channel_samples, trim, remaining, read_pos);
                 if wrapsub(chunk_end, self.write_pos) > 0 {
                     self.write_pos = chunk_end;
                 }
@@ -809,8 +853,8 @@ impl SendspinBridge {
             }
 
             // Normal: write chunk at target
-            let chunk = self.pending_chunks.pop_front().unwrap();
-            self.write_samples_at(&chunk.channel_samples, chunk.frames, target);
+            let mut chunk = self.pending_chunks.pop_front().unwrap();
+            self.write_samples_at(&mut chunk.channel_samples, chunk.frames, target);
             if wrapsub(chunk_end, self.write_pos) > 0 {
                 self.write_pos = chunk_end;
             }
@@ -824,8 +868,8 @@ impl SendspinBridge {
     /// Fallback: write pending chunks sequentially (clock sync not ready or read_pos=0).
     fn drain_sequential(&mut self) {
         let read_pos = self.get_read_pos();
-        while let Some(chunk) = self.pending_chunks.pop_front() {
-            self.write_samples_at(&chunk.channel_samples, chunk.frames, self.write_pos);
+        while let Some(mut chunk) = self.pending_chunks.pop_front() {
+            self.write_samples_at(&mut chunk.channel_samples, chunk.frames, self.write_pos);
             self.write_pos = self.write_pos.wrapping_add(chunk.frames);
             self.update_state_after_write(chunk.frames, read_pos);
         }
@@ -865,7 +909,15 @@ impl SendspinBridge {
 
     // ─── Ring buffer writes ─────────────────────────────────────────
 
-    fn write_samples_at(&mut self, channel_samples: &[Vec<Sample>], _frames: usize, pos: usize) {
+    fn write_samples_at(
+        &mut self,
+        channel_samples: &mut [Vec<Sample>],
+        frames: usize,
+        pos: usize,
+    ) {
+        if let Some(gc) = &self.gain_control {
+            self.gain_ramp.apply(channel_samples, frames, gc.gain());
+        }
         if let Some(inputs) = &mut self.rb_inputs {
             for (ch, samples) in channel_samples.iter().enumerate() {
                 inputs[ch].write_from_at(pos, samples.iter().copied());
@@ -875,11 +927,17 @@ impl SendspinBridge {
 
     fn write_trimmed_samples(
         &mut self,
-        channel_samples: &[Vec<Sample>],
+        channel_samples: &mut [Vec<Sample>],
         trim: usize,
         remaining: usize,
         pos: usize,
     ) {
+        if let Some(gc) = &self.gain_control {
+            let target = gc.gain();
+            self.gain_ramp.advance(trim, target);
+            self.gain_ramp
+                .apply_range(channel_samples, trim, remaining, target);
+        }
         if let Some(inputs) = &mut self.rb_inputs {
             for (ch, samples) in channel_samples.iter().enumerate() {
                 inputs[ch].write_from_at(pos, samples[trim..trim + remaining].iter().copied());

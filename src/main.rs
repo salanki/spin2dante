@@ -3,7 +3,15 @@ use log::info;
 use std::env;
 
 mod bridge;
+mod gain;
 mod metrics;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum VolumeControlMode {
+    #[default]
+    None,
+    Bridge,
+}
 
 const ABOUT: &str = "spin2dante
 Copyright (C) 2025
@@ -53,6 +61,11 @@ struct Args {
     /// Stable Sendspin client ID. If omitted, derived from name (+ INFERNO_PROCESS_ID if set).
     #[arg(long)]
     client_id: Option<String>,
+
+    /// Volume control mode: "none" (default, no volume capability) or
+    /// "bridge" (software gain applied inside the bridge).
+    #[arg(long, value_enum, default_value_t = VolumeControlMode::None)]
+    volume_control: VolumeControlMode,
 }
 
 #[tokio::main]
@@ -63,13 +76,14 @@ async fn main() {
     let args = Args::parse();
 
     info!(
-        "spin2dante starting: url={} name={} buffer={}ms drift_threshold={}ms drift_check_interval={}ms max_correction={}samples",
+        "spin2dante starting: url={} name={} buffer={}ms drift_threshold={}ms drift_check_interval={}ms max_correction={}samples volume_control={:?}",
         args.url,
         args.name,
         args.buffer_ms,
         args.drift_threshold_ms,
         args.drift_check_interval_ms,
-        args.max_correction_samples_per_tick
+        args.max_correction_samples_per_tick,
+        args.volume_control,
     );
 
     let client_id = args.client_id.unwrap_or_else(|| derive_client_id(&args.name));
@@ -83,6 +97,7 @@ async fn main() {
         args.drift_check_interval_ms,
         args.max_correction_samples_per_tick,
         client_id,
+        args.volume_control,
     );
 
     if let Err(e) = bridge.run().await {
