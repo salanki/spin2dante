@@ -64,3 +64,4 @@ schema:
       volume_control: list(none|bridge)?
       process_id: int(1,65535)
       alt_port: int(1024,65532)
+      report_dante_subscriber: bool?

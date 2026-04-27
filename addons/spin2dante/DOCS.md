@@ -36,6 +36,7 @@ Each bridge entry contains:
 - `volume_control`: Volume control mode — `none` (default, passthrough) or `bridge` (software gain). See [Volume Control](#volume-control) below.
 - `process_id`: Unique Inferno process ID on the host IP
 - `alt_port`: Unique Inferno base UDP port, spaced at least 10 apart from other bridges
+- `report_dante_subscriber`: (optional) When true, the bridge reports ExternalSource to Music Assistant when no DANTE receiver is subscribed, causing the player to leave its group. Default: false.
 
 ### Sendspin URL
 

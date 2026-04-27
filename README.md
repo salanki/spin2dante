@@ -140,6 +140,7 @@ Each bridge instance is configured via CLI arguments and environment variables.
 | `--max-correction-samples-per-tick` | 48 | Maximum anchor shift applied in one drift-correction tick. |
 | `--client-id` | Derived from name | Stable Sendspin/Music Assistant player identity |
 | `--volume-control` | none | Volume control mode: `none` (default, passthrough) or `bridge` (software gain applied inside the bridge). See [Volume Control](#volume-control) below. |
+| `--report-dante-subscriber` | false | Report DANTE receiver subscription state to the Sendspin server. When enabled, the bridge sends ExternalSource while no receiver is subscribed, causing Music Assistant to remove the player from its group. Once a receiver subscribes, it sends Synchronized so the player can rejoin. |
 
 Bridges that should stay sample-aligned with each other should use the same
 `--buffer-ms` value.

@@ -112,6 +112,12 @@ for ((i = 0; i < BRIDGE_COUNT; i++)); do
     mkdir -p "$tmpdir"
 
     volume_control="$(jq -r ".bridges[$i].volume_control // \"none\"" "$OPTIONS_FILE")"
+    report_dante_subscriber="$(jq -r ".bridges[$i].report_dante_subscriber // false" "$OPTIONS_FILE")"
+
+    extra_args=()
+    if [[ "$report_dante_subscriber" == "true" ]]; then
+        extra_args+=(--report-dante-subscriber)
+    fi
 
     bashio::log.info "Starting bridge '$id' (${name}) on alt_port=${alt_port}, process_id=${process_id}, volume_control=${volume_control}"
     HOME="/data" \
@@ -125,7 +131,8 @@ for ((i = 0; i < BRIDGE_COUNT; i++)); do
         --drift-threshold-ms "$DRIFT_THRESHOLD_MS" \
         --drift-check-interval-ms "$DRIFT_CHECK_INTERVAL_MS" \
         --max-correction-samples-per-tick "$MAX_CORRECTION_SAMPLES_PER_TICK" \
-        --volume-control "$volume_control" &
+        --volume-control "$volume_control" \
+        "${extra_args[@]}" &
 
     PIDS+=("$!")
 done

@@ -199,6 +199,51 @@ At 100% volume with mute off, the gain path is a true no-op: `ramp_frames_remain
 
 The gain ramp state is reset on stream transitions (StreamStart, StreamEnd, StreamClear, reconnection) to avoid carrying stale ramp state into new audio.
 
+## DANTE Subscriber State Reporting
+
+When `--report-dante-subscriber` is enabled, the bridge reports its DANTE receiver subscription status to the Sendspin server via `ClientSyncState`. This lets Music Assistant know whether audio sent to this bridge will actually reach a speaker.
+
+### Protocol mapping
+
+- **No subscriber** → `ClientSyncState::ExternalSource`: MA removes the player from its group (other group members keep playing) and places it in a solo stopped group.
+- **Subscriber present** → `ClientSyncState::Synchronized`: MA treats the player as operational; it can rejoin groups and receive audio.
+
+`ExternalSource` was chosen over `Error` because MA's aiosendspin server ignores `Error` entirely (no-op), while `ExternalSource` triggers a graceful group removal without stopping other players.
+
+### Detection mechanism
+
+Subscriber presence is detected via `read_pos` movement from inferno's FlowsTransmitter:
+
+- `read_pos == 0` → PTP clock not ready (not a subscriber signal)
+- `read_pos` advancing (changes between samples) → at least one DANTE receiver is consuming the flow
+- `read_pos` stale for >10s while nonzero → subscriber lost
+
+`read_pos` is per-flow, not per-channel. If a receiver subscribes to only one of the two stereo channels, `read_pos` still advances — the bridge correctly treats this as "connected."
+
+### Critical constraint: timer-based detection
+
+When `ExternalSource` is active, MA stops sending audio to the bridge. This means `handle_audio()` won't be called. Therefore, **subscriber detection must run from the periodic metrics timer** (every 5s), not from audio handlers. The audio handler supplements the timer with faster liveness updates when audio IS flowing, but the timer is the primary detection path that enables recovery.
+
+### State transitions
+
+```
+connect → ExternalSource (always start unconfirmed)
+                │
+        read_pos movement detected (timer)
+                ▼
+          Synchronized
+                │
+        read_pos stale >10s (timer)
+                ▼
+          ExternalSource
+                │
+        read_pos movement detected (timer)
+                ▼
+          Synchronized
+```
+
+Subscriber detection requires observed `read_pos` movement from a stored baseline — a static nonzero `read_pos` is not sufficient. This prevents state flapping when a stale position lingers after subscriber loss.
+
 ## Multi-Stream Deployment
 
 One bridge process per Sendspin stream. Each bridge needs unique `INFERNO_PROCESS_ID` and `INFERNO_ALT_PORT` (or unique `INFERNO_DEVICE_ID` in Docker bridge networks).

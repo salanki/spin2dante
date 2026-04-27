@@ -8,8 +8,10 @@ use parking_lot::Mutex;
 use atomic::Atomic;
 use inferno_aoip::device_server::{DeviceServer, OwnedBuffer, RBInput, ReadPositionSnapshot, Sample, Settings};
 use log::{debug, error, info, warn};
-use sendspin::protocol::client::{AudioChunk, Connection};
-use sendspin::protocol::messages::{AudioFormatSpec, Message, PlayerCommandType, PlayerV1Support};
+use sendspin::protocol::client::{AudioChunk, Connection, WsSender};
+use sendspin::protocol::messages::{
+    AudioFormatSpec, ClientState, ClientSyncState, Message, PlayerCommandType, PlayerV1Support,
+};
 use sendspin::sync::clock::ClockSync;
 use sendspin::{GainControl, ProtocolClientBuilder};
 use tokio::sync::oneshot;
@@ -121,6 +123,12 @@ pub struct SendspinBridge {
     // Volume control
     gain_control: Option<GainControl>,
     gain_ramp: BridgeGainRamp,
+    // DANTE subscriber state reporting
+    report_dante_subscriber: bool,
+    sender: Option<WsSender>,
+    has_subscriber: bool,
+    last_read_pos_change: Option<Instant>,
+    pending_sync_state: Option<ClientSyncState>,
 }
 
 impl SendspinBridge {
@@ -133,6 +141,7 @@ impl SendspinBridge {
         max_correction_samples_per_tick: usize,
         client_id: String,
         volume_control: VolumeControlMode,
+        report_dante_subscriber: bool,
     ) -> Self {
         let prebuffer_target = ms_to_samples(buffer_ms);
         let gain_control = if volume_control == VolumeControlMode::Bridge {
@@ -176,6 +185,11 @@ impl SendspinBridge {
             drift_checks_skipped: 0,
             gain_control,
             gain_ramp: BridgeGainRamp::new(),
+            report_dante_subscriber,
+            sender: None,
+            has_subscriber: false,
+            last_read_pos_change: None,
+            pending_sync_state: None,
         }
     }
 
@@ -302,10 +316,17 @@ impl SendspinBridge {
             mut messages,
             mut audio,
             clock_sync,
+            sender,
             guard: _guard,
             ..
         } = client.split();
         self.clock_sync = Some(clock_sync);
+        self.sender = Some(sender);
+
+        self.has_subscriber = false;
+        self.last_read_pos_change = None;
+        self.last_read_pos = self.get_read_pos();
+        self.queue_sync_state(ClientSyncState::ExternalSource);
 
         let mut metrics_interval =
             tokio::time::interval(std::time::Duration::from_secs(METRICS_INTERVAL_SECS));
@@ -334,6 +355,18 @@ impl SendspinBridge {
                 _ = tokio::signal::ctrl_c() => {
                     info!("shutting down");
                     return Ok(());
+                }
+            }
+
+            if let Some(state) = self.pending_sync_state.take() {
+                if let Some(ref sender) = self.sender {
+                    let msg = Message::ClientState(ClientState {
+                        state: Some(state),
+                        player: None,
+                    });
+                    if let Err(e) = sender.send_message(msg).await {
+                        warn!("failed to send player sync state: {e}");
+                    }
                 }
             }
         }
@@ -561,6 +594,14 @@ impl SendspinBridge {
 
     // ─── State transitions ──────────────────────────────────────────
 
+    fn queue_sync_state(&mut self, state: ClientSyncState) {
+        if !self.report_dante_subscriber {
+            return;
+        }
+        info!("reporting player sync state: {:?}", state);
+        self.pending_sync_state = Some(state);
+    }
+
     fn enter_idle(&mut self) {
         if let Some(inputs) = &mut self.rb_inputs {
             let half = RING_BUFFER_SIZE / 2;
@@ -574,6 +615,8 @@ impl SendspinBridge {
         self.stream_format = None;
         self.prebuffer_written = 0;
         self.last_read_pos = 0;
+        self.has_subscriber = false;
+        self.last_read_pos_change = None;
         self.reset_scheduler();
         self.state = BridgeState::Idle;
         self.metrics.reset();
@@ -639,6 +682,15 @@ impl SendspinBridge {
         }
 
         let read_pos = self.get_read_pos();
+
+        if self.report_dante_subscriber
+            && self.has_subscriber
+            && read_pos != 0
+            && read_pos != self.last_read_pos
+        {
+            self.last_read_pos_change = Some(Instant::now());
+            self.last_read_pos = read_pos;
+        }
 
         // ── Auto-realignment: detect PTP domain mismatch ──
         if read_pos != 0 {
@@ -989,6 +1041,31 @@ impl SendspinBridge {
                 self.metrics.log(self.write_pos, self.get_read_pos());
             }
             _ => {}
+        }
+
+        if self.report_dante_subscriber {
+            let read_pos = self.get_read_pos();
+
+            if !self.has_subscriber && read_pos != 0 && read_pos != self.last_read_pos {
+                self.has_subscriber = true;
+                self.last_read_pos_change = Some(Instant::now());
+                self.last_read_pos = read_pos;
+                info!("DANTE subscriber detected (read_pos={})", read_pos);
+                self.queue_sync_state(ClientSyncState::Synchronized);
+            } else if self.has_subscriber && read_pos != 0 {
+                if read_pos != self.last_read_pos {
+                    self.last_read_pos_change = Some(Instant::now());
+                    self.last_read_pos = read_pos;
+                } else if let Some(last_change) = self.last_read_pos_change {
+                    if last_change.elapsed() > Duration::from_secs(10) {
+                        warn!("DANTE subscriber appears lost (read_pos stale for >10s)");
+                        self.has_subscriber = false;
+                        self.queue_sync_state(ClientSyncState::ExternalSource);
+                    }
+                }
+            } else if self.has_subscriber && read_pos == 0 {
+                self.last_read_pos_change = None;
+            }
         }
     }
 

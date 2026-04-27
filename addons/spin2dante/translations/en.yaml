@@ -25,3 +25,10 @@ configuration:
     description: >-
       "none" (default) for transparent passthrough, or "bridge" to enable
       software volume/mute control from Music Assistant.
+  report_dante_subscriber:
+    name: Report DANTE subscriber
+    description: >-
+      When enabled, the bridge reports ExternalSource to Music Assistant while
+      no DANTE receiver is subscribed, causing the player to leave its group.
+      Once a receiver subscribes, it reports Synchronized so the player can
+      rejoin.

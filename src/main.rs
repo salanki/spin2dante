@@ -66,6 +66,15 @@ struct Args {
     /// "bridge" (software gain applied inside the bridge).
     #[arg(long, value_enum, default_value_t = VolumeControlMode::None)]
     volume_control: VolumeControlMode,
+
+    /// Report DANTE receiver subscription state to the Sendspin server.
+    ///
+    /// When enabled, the bridge sends ExternalSource while no DANTE receiver
+    /// is subscribed, causing Music Assistant to remove the player from its
+    /// group. Once a receiver subscribes, it sends Synchronized so the player
+    /// can rejoin. Disabled by default.
+    #[arg(long, default_value_t = false)]
+    report_dante_subscriber: bool,
 }
 
 #[tokio::main]
@@ -76,7 +85,7 @@ async fn main() {
     let args = Args::parse();
 
     info!(
-        "spin2dante starting: url={} name={} buffer={}ms drift_threshold={}ms drift_check_interval={}ms max_correction={}samples volume_control={:?}",
+        "spin2dante starting: url={} name={} buffer={}ms drift_threshold={}ms drift_check_interval={}ms max_correction={}samples volume_control={:?} report_dante_subscriber={}",
         args.url,
         args.name,
         args.buffer_ms,
@@ -84,6 +93,7 @@ async fn main() {
         args.drift_check_interval_ms,
         args.max_correction_samples_per_tick,
         args.volume_control,
+        args.report_dante_subscriber,
     );
 
     let client_id = args.client_id.unwrap_or_else(|| derive_client_id(&args.name));
@@ -98,6 +108,7 @@ async fn main() {
         args.max_correction_samples_per_tick,
         client_id,
         args.volume_control,
+        args.report_dante_subscriber,
     );
 
     if let Err(e) = bridge.run().await {
