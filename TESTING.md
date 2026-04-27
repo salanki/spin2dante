@@ -446,4 +446,4 @@ Tested and validated via `make test-resilience`:
 - **Sendspin source is 16-bit**: The `sendspin serve` CLI hardcodes its audio decoder to `s16` (16-bit signed) via PyAV, regardless of the input file's bit depth. A 24-bit WAV is truncated to 16-bit before being sent as "24-bit PCM." The test reference signal is generated at 16-bit to match this reality. True 24-bit end-to-end testing requires a Sendspin server that preserves 24-bit samples.
 - **PTP clock warmup**: 10-15s of "clock unavailable" is normal while the Statime follower syncs to the master. The bridge auto-realigns once the clock becomes available.
 - **Single-run test audio**: The 30s deterministic reference loops only if sendspin loops it. After 30s, the stream may end.
-- **FLAC not testable**: sendspin-rs v0.1 only has a PCM decoder. FLAC testing requires either a newer sendspin-rs or a custom decoder.
+- **FLAC not testable**: sendspin-rs only has a PCM decoder. FLAC testing requires a custom decoder.

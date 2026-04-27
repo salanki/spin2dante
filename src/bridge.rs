@@ -8,7 +8,7 @@ use parking_lot::Mutex;
 use atomic::Atomic;
 use inferno_aoip::device_server::{DeviceServer, OwnedBuffer, RBInput, ReadPositionSnapshot, Sample, Settings};
 use log::{debug, error, info, warn};
-use sendspin::protocol::client::AudioChunk;
+use sendspin::protocol::client::{AudioChunk, Connection};
 use sendspin::protocol::messages::{AudioFormatSpec, Message, PlayerV1Support};
 use sendspin::sync::clock::ClockSync;
 use sendspin::ProtocolClientBuilder;
@@ -281,7 +281,13 @@ impl SendspinBridge {
 
         info!("connected to Sendspin server");
 
-        let (mut messages, mut audio, clock_sync, _sender, _guard) = client.split();
+        let Connection {
+            mut messages,
+            mut audio,
+            clock_sync,
+            guard: _guard,
+            ..
+        } = client.split();
         self.clock_sync = Some(clock_sync);
 
         let mut metrics_interval =
@@ -421,7 +427,7 @@ impl SendspinBridge {
         if !sync.is_synchronized() {
             return None;
         }
-        let now_us = sync.instant_to_client_micros(std::time::Instant::now())?;
+        let now_us = sync.instant_to_client_micros(std::time::Instant::now());
         sync.client_to_server_micros(now_us)
     }
 
@@ -441,7 +447,7 @@ impl SendspinBridge {
         if !sync.is_synchronized() {
             return None;
         }
-        let client_us = sync.instant_to_client_micros(snapshot_instant)?;
+        let client_us = sync.instant_to_client_micros(snapshot_instant);
         let server_us = sync.client_to_server_micros(client_us)?;
         Some((read_pos, server_us))
     }
