@@ -1,6 +1,6 @@
 # Changelog
 
-## PENDING — 2026-05-11
+## sha-cd4754b — 2026-05-11
 
 ### Added
 - Home Assistant add-on option `dante_bind` to bind DANTE and mDNS traffic to a specific interface name or IPv4 address. Use `auto` to keep Inferno's default local-address selection.
