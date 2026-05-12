@@ -139,6 +139,7 @@ Each bridge instance is configured via CLI arguments and environment variables.
 | `--drift-check-interval-ms` | 1000 | How often to sample drift between the Sendspin and PTP timelines. |
 | `--max-correction-samples-per-tick` | 48 | Maximum anchor shift applied in one drift-correction tick. |
 | `--client-id` | Derived from name | Stable Sendspin/Music Assistant player identity |
+| `--dante-latency` | 10 | DANTE transmit latency in milliseconds, advertised to receivers as their minimum playout buffer. Allowed values: `0.5`, `1`, `2`, `5`, `10`, `20`. |
 | `--volume-control` | none | Volume control mode: `none` (default, passthrough) or `bridge` (software gain applied inside the bridge). See [Volume Control](#volume-control) below. |
 | `--report-dante-subscriber` | false | Report DANTE receiver subscription state to the Sendspin server. When enabled, the bridge sends ExternalSource while no receiver is subscribed, causing Music Assistant to remove the player from its group. Once a receiver subscribes, it sends Synchronized so the player can rejoin. |
 

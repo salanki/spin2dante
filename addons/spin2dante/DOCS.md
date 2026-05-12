@@ -33,6 +33,7 @@ Each bridge entry contains:
 - `name`: DANTE device name to advertise
 - `url`: Sendspin WebSocket URL
 - `buffer_ms`: Playout buffer / latency in milliseconds. Larger values improve jitter tolerance, but they also delay audio by that amount.
+- `dante_latency`: DANTE transmit latency in milliseconds, advertised to receivers as their minimum playout buffer. Allowed values: `0.5`, `1`, `2`, `5`, `10`, `20`. Default: `10`.
 - `volume_control`: Volume control mode — `none` (default, passthrough) or `bridge` (software gain). See [Volume Control](#volume-control) below.
 - `process_id`: Unique Inferno process ID on the host IP
 - `alt_port`: Unique Inferno base UDP port, spaced at least 10 apart from other bridges

@@ -20,6 +20,12 @@ configuration:
   bridges:
     name: Bridges
     description: List of Sendspin-to-DANTE bridge definitions.
+  dante_latency:
+    name: DANTE latency
+    description: >-
+      Transmit latency advertised to DANTE receivers (ms). Lower values
+      reduce end-to-end audio delay but need a reliable low-jitter network.
+      Standard values: 0.5, 1, 2, 5, 10, 20. Default: 10.
   volume_control:
     name: Volume control
     description: >-

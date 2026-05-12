@@ -29,6 +29,7 @@ declare -A IDS=()
 declare -A PROCESS_IDS=()
 declare -A ALT_PORTS=()
 declare -A BUFFER_VALUES=()
+declare -A LATENCY_VALUES=()
 declare -a ALT_PORT_VALUES=()
 declare -a PIDS=()
 
@@ -68,12 +69,18 @@ for ((i = 0; i < BRIDGE_COUNT; i++)); do
         fi
     done
     ALT_PORT_VALUES+=("$alt_port")
+    dante_latency="$(jq -r ".bridges[$i].dante_latency // \"10\"" "$OPTIONS_FILE")"
     BUFFER_VALUES[$buffer_ms]=1
+    LATENCY_VALUES[$dante_latency]=1
 
 done
 
 if (( ${#BUFFER_VALUES[@]} > 1 )); then
     bashio::log.warning "Mixed buffer_ms values detected across bridges. buffer_ms is real playout latency, not just jitter tolerance, so bridges with different values will not stay sample-aligned."
+fi
+
+if (( ${#LATENCY_VALUES[@]} > 1 )); then
+    bashio::log.warning "Mixed dante_latency values detected across bridges. Receivers subscribing to different bridges will use different playout buffers."
 fi
 
 if (( WAIT_FOR_CLOCK_SECONDS > 0 )); then
@@ -111,6 +118,7 @@ for ((i = 0; i < BRIDGE_COUNT; i++)); do
 
     mkdir -p "$tmpdir"
 
+    dante_latency="$(jq -r ".bridges[$i].dante_latency // \"10\"" "$OPTIONS_FILE")"
     volume_control="$(jq -r ".bridges[$i].volume_control // \"none\"" "$OPTIONS_FILE")"
     report_dante_subscriber="$(jq -r ".bridges[$i].report_dante_subscriber // false" "$OPTIONS_FILE")"
 
@@ -119,7 +127,7 @@ for ((i = 0; i < BRIDGE_COUNT; i++)); do
         extra_args+=(--report-dante-subscriber)
     fi
 
-    bashio::log.info "Starting bridge '$id' (${name}) on alt_port=${alt_port}, process_id=${process_id}, volume_control=${volume_control}"
+    bashio::log.info "Starting bridge '$id' (${name}) on alt_port=${alt_port}, process_id=${process_id}, dante_latency=${dante_latency}, volume_control=${volume_control}"
     HOME="/data" \
     TMPDIR="$tmpdir" \
     INFERNO_PROCESS_ID="$process_id" \
@@ -128,6 +136,7 @@ for ((i = 0; i < BRIDGE_COUNT; i++)); do
         --url "$url" \
         --name "$name" \
         --buffer-ms "$buffer_ms" \
+        --dante-latency "$dante_latency" \
         --drift-threshold-ms "$DRIFT_THRESHOLD_MS" \
         --drift-check-interval-ms "$DRIFT_CHECK_INTERVAL_MS" \
         --max-correction-samples-per-tick "$MAX_CORRECTION_SAMPLES_PER_TICK" \

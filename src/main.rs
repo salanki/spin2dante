@@ -13,6 +13,48 @@ pub enum VolumeControlMode {
     Bridge,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum DanteLatency {
+    #[value(name = "0.5")]
+    Ms0_5,
+    #[value(name = "1")]
+    Ms1,
+    #[value(name = "2")]
+    Ms2,
+    #[value(name = "5")]
+    Ms5,
+    #[value(name = "10")]
+    Ms10,
+    #[value(name = "20")]
+    Ms20,
+}
+
+impl DanteLatency {
+    pub fn as_ns(self) -> u32 {
+        match self {
+            Self::Ms0_5 => 500_000,
+            Self::Ms1 => 1_000_000,
+            Self::Ms2 => 2_000_000,
+            Self::Ms5 => 5_000_000,
+            Self::Ms10 => 10_000_000,
+            Self::Ms20 => 20_000_000,
+        }
+    }
+}
+
+impl std::fmt::Display for DanteLatency {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ms0_5 => write!(f, "0.5ms"),
+            Self::Ms1 => write!(f, "1ms"),
+            Self::Ms2 => write!(f, "2ms"),
+            Self::Ms5 => write!(f, "5ms"),
+            Self::Ms10 => write!(f, "10ms"),
+            Self::Ms20 => write!(f, "20ms"),
+        }
+    }
+}
+
 const ABOUT: &str = "spin2dante
 Copyright (C) 2025
 
@@ -67,6 +109,11 @@ struct Args {
     #[arg(long, value_enum, default_value_t = VolumeControlMode::None)]
     volume_control: VolumeControlMode,
 
+    /// DANTE transmit latency in milliseconds. Advertised to receivers and
+    /// determines their minimum playout buffer. Standard Dante values only.
+    #[arg(long, value_enum, default_value = "10")]
+    dante_latency: DanteLatency,
+
     /// Report DANTE receiver subscription state to the Sendspin server.
     ///
     /// When enabled, the bridge sends ExternalSource while no DANTE receiver
@@ -85,10 +132,11 @@ async fn main() {
     let args = Args::parse();
 
     info!(
-        "spin2dante starting: url={} name={} buffer={}ms drift_threshold={}ms drift_check_interval={}ms max_correction={}samples volume_control={:?} report_dante_subscriber={}",
+        "spin2dante starting: url={} name={} buffer={}ms dante_latency={} drift_threshold={}ms drift_check_interval={}ms max_correction={}samples volume_control={:?} report_dante_subscriber={}",
         args.url,
         args.name,
         args.buffer_ms,
+        args.dante_latency,
         args.drift_threshold_ms,
         args.drift_check_interval_ms,
         args.max_correction_samples_per_tick,
@@ -105,6 +153,7 @@ async fn main() {
         args.url,
         args.name,
         args.buffer_ms,
+        args.dante_latency.as_ns(),
         args.drift_threshold_ms,
         args.drift_check_interval_ms,
         args.max_correction_samples_per_tick,

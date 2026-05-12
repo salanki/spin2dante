@@ -88,6 +88,7 @@ pub struct SendspinBridge {
     device_name: String,
     client_id: String,
     buffer_ms: u32,
+    dante_latency_ns: u32,
     drift_threshold_samples: usize,
     drift_check_interval: Duration,
     max_correction_samples: usize,
@@ -140,6 +141,7 @@ impl SendspinBridge {
         url: String,
         device_name: String,
         buffer_ms: u32,
+        dante_latency_ns: u32,
         drift_threshold_ms: u32,
         drift_check_interval_ms: u64,
         max_correction_samples_per_tick: usize,
@@ -158,6 +160,7 @@ impl SendspinBridge {
             device_name,
             client_id,
             buffer_ms,
+            dante_latency_ns,
             drift_threshold_samples: ms_to_samples(drift_threshold_ms),
             drift_check_interval: Duration::from_millis(drift_check_interval_ms),
             max_correction_samples: max_correction_samples_per_tick,
@@ -222,6 +225,8 @@ impl SendspinBridge {
         config.insert("NAME".to_string(), self.device_name.clone());
         config.insert("TX_SOURCE_BIT_DEPTH".to_string(), "24".to_string());
         config.insert("SAMPLE_RATE".to_string(), SAMPLE_RATE.to_string());
+        config.insert("TX_LATENCY_NS".to_string(), self.dante_latency_ns.to_string());
+        config.insert("RX_LATENCY_NS".to_string(), self.dante_latency_ns.to_string());
         let mut settings = Settings::new(&self.device_name, &short_name, None, &config);
         settings.make_tx_channels(CHANNELS);
         settings.make_rx_channels(0);
