@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 
 use atomic::Atomic;
-use inferno_aoip::device_server::{DeviceServer, OwnedBuffer, RBInput, ReadPositionSnapshot, Sample, Settings};
+use inferno_aoip::device_server::{
+    DeviceServer, OwnedBuffer, RBInput, ReadPositionSnapshot, Sample, Settings,
+};
 use log::{debug, error, info, warn};
 use sendspin::protocol::client::{AudioChunk, Connection, WsSender};
 use sendspin::protocol::messages::{
@@ -1009,12 +1011,7 @@ impl SendspinBridge {
 
     // ─── Ring buffer writes ─────────────────────────────────────────
 
-    fn write_samples_at(
-        &mut self,
-        channel_samples: &mut [Vec<Sample>],
-        frames: usize,
-        pos: usize,
-    ) {
+    fn write_samples_at(&mut self, channel_samples: &mut [Vec<Sample>], frames: usize, pos: usize) {
         if let Some(gc) = &self.gain_control {
             self.gain_ramp.apply(channel_samples, frames, gc.gain());
         }

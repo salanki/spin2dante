@@ -116,7 +116,9 @@ impl BridgeGainRamp {
 
         self.update_target(target);
 
-        let advance = u32::try_from(frames).unwrap_or(u32::MAX).min(self.ramp_frames_remaining);
+        let advance = u32::try_from(frames)
+            .unwrap_or(u32::MAX)
+            .min(self.ramp_frames_remaining);
         if advance > 0 {
             self.current_gain += self.ramp_step * advance as f32;
             self.ramp_frames_remaining -= advance;
@@ -145,8 +147,7 @@ impl BridgeGainRamp {
                 self.current_gain = target;
             } else {
                 self.ramp_frames_remaining = self.ramp_duration_frames;
-                self.ramp_step =
-                    (target - self.current_gain) / self.ramp_duration_frames as f32;
+                self.ramp_step = (target - self.current_gain) / self.ramp_duration_frames as f32;
             }
             self.last_target = target;
         }
@@ -166,12 +167,7 @@ fn apply_gain_to_frame(channel_samples: &mut [Vec<Sample>], frame: usize, gain: 
     }
 }
 
-fn apply_gain_to_range(
-    channel_samples: &mut [Vec<Sample>],
-    from: usize,
-    to: usize,
-    gain: f32,
-) {
+fn apply_gain_to_range(channel_samples: &mut [Vec<Sample>], from: usize, to: usize, gain: f32) {
     if gain == 0.0 {
         for ch in channel_samples.iter_mut() {
             ch[from..to].fill(0);
@@ -343,9 +339,7 @@ mod tests {
             split_samples[0][10..20],
             "trimmed advance+apply produced different samples than full apply"
         );
-        assert!(
-            (ramp_full.current_gain - ramp_split.current_gain).abs() < f32::EPSILON,
-        );
+        assert!((ramp_full.current_gain - ramp_split.current_gain).abs() < f32::EPSILON,);
     }
 
     #[test]

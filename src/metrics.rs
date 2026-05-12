@@ -40,11 +40,13 @@ impl BufferMetrics {
             let deviation = fill - target;
             if let Some(last_time) = self.last_log_time {
                 let interval = now.duration_since(last_time).as_secs_f64();
-                let last_fill = (self.last_write_pos as isize).wrapping_sub(self.last_read_pos as isize);
+                let last_fill =
+                    (self.last_write_pos as isize).wrapping_sub(self.last_read_pos as isize);
                 let fill_change = fill - last_fill;
                 if interval > 0.0 {
                     let drift_samples_per_sec = fill_change as f64 / interval;
-                    let drift_ppm = (drift_samples_per_sec / super::bridge::SAMPLE_RATE as f64) * 1_000_000.0;
+                    let drift_ppm =
+                        (drift_samples_per_sec / super::bridge::SAMPLE_RATE as f64) * 1_000_000.0;
                     format!("{:+.1}ppm", drift_ppm)
                 } else {
                     "n/a".to_string()

@@ -96,7 +96,9 @@ async fn main() {
         args.report_dante_subscriber,
     );
 
-    let client_id = args.client_id.unwrap_or_else(|| derive_client_id(&args.name));
+    let client_id = args
+        .client_id
+        .unwrap_or_else(|| derive_client_id(&args.name));
     info!("using Sendspin client_id={}", client_id);
 
     let mut bridge = bridge::SendspinBridge::new(
