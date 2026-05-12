@@ -8,6 +8,11 @@ configuration:
   log_level:
     name: Log level
     description: Verbosity of add-on logs.
+  dante_bind:
+    name: DANTE bind
+    description: >-
+      Interface name or IPv4 address to use for DANTE/mDNS traffic. Set to
+      auto to let Inferno choose the host's default local IPv4 address.
   drift_threshold_ms:
     name: Drift threshold
     description: Drift in milliseconds before the bridge applies an in-place anchor correction.

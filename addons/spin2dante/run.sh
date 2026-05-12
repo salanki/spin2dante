@@ -4,6 +4,7 @@ set -euo pipefail
 CLOCK_PATH="$(bashio::config 'clock_path')"
 WAIT_FOR_CLOCK_SECONDS="$(bashio::config 'wait_for_clock_seconds')"
 LOG_LEVEL="$(bashio::config 'log_level')"
+DANTE_BIND="$(bashio::config 'dante_bind')"
 DRIFT_THRESHOLD_MS="$(bashio::config 'drift_threshold_ms')"
 DRIFT_CHECK_INTERVAL_MS="$(bashio::config 'drift_check_interval_ms')"
 MAX_CORRECTION_SAMPLES_PER_TICK="$(bashio::config 'max_correction_samples_per_tick')"
@@ -24,6 +25,10 @@ export RUST_LOG="$LOG_LEVEL"
 export INFERNO_CLOCK_PATH="$CLOCK_PATH"
 export INFERNO_TX_CHANNELS="2"
 export INFERNO_RX_CHANNELS="0"
+
+if [[ "$DANTE_BIND" == "auto" ]]; then
+    DANTE_BIND=""
+fi
 
 declare -A IDS=()
 declare -A PROCESS_IDS=()
@@ -107,6 +112,12 @@ terminate_children() {
 
 trap 'bashio::log.info "Stopping bridge processes"; terminate_children; exit 0' SIGTERM SIGINT
 
+if [[ -n "$DANTE_BIND" ]]; then
+    bashio::log.info "DANTE bind: $DANTE_BIND"
+else
+    bashio::log.info "DANTE bind: auto"
+fi
+
 for ((i = 0; i < BRIDGE_COUNT; i++)); do
     id="$(jq -r ".bridges[$i].id" "$OPTIONS_FILE")"
     name="$(jq -r ".bridges[$i].name" "$OPTIONS_FILE")"
@@ -127,11 +138,18 @@ for ((i = 0; i < BRIDGE_COUNT; i++)); do
         extra_args+=(--report-dante-subscriber)
     fi
 
+    bridge_env=(
+        HOME="/data"
+        TMPDIR="$tmpdir"
+        INFERNO_PROCESS_ID="$process_id"
+        INFERNO_ALT_PORT="$alt_port"
+    )
+    if [[ -n "$DANTE_BIND" ]]; then
+        bridge_env+=(INFERNO_BIND_IP="$DANTE_BIND")
+    fi
+
     bashio::log.info "Starting bridge '$id' (${name}) on alt_port=${alt_port}, process_id=${process_id}, dante_latency=${dante_latency}, volume_control=${volume_control}"
-    HOME="/data" \
-    TMPDIR="$tmpdir" \
-    INFERNO_PROCESS_ID="$process_id" \
-    INFERNO_ALT_PORT="$alt_port" \
+    env "${bridge_env[@]}" \
     /usr/local/bin/spin2dante \
         --url "$url" \
         --name "$name" \

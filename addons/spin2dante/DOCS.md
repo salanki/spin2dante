@@ -23,6 +23,7 @@ Use the companion `statime` add-on first. The intended setup is:
 - `clock_path`: Path to the exported usrvclock socket
 - `wait_for_clock_seconds`: How long to wait for the clock socket before failing startup
 - `log_level`: Rust log level for all bridge processes
+- `dante_bind`: Interface name or IPv4 address to use for DANTE/mDNS traffic. Use `auto` to let Inferno choose the host's default local IPv4 address.
 - `drift_threshold_ms`: Drift threshold in milliseconds before the bridge applies an in-place anchor correction
 - `drift_check_interval_ms`: How often, in milliseconds, to sample drift between the Sendspin and PTP timelines
 - `max_correction_samples_per_tick`: Maximum anchor shift, in samples, applied in one drift-correction tick
@@ -56,6 +57,7 @@ For a remote Music Assistant, use its LAN IP or its Supervisor DNS name
 clock_path: /share/usrvclock
 wait_for_clock_seconds: 30
 log_level: info
+dante_bind: auto
 drift_threshold_ms: 5
 drift_check_interval_ms: 1000
 max_correction_samples_per_tick: 48
@@ -89,6 +91,18 @@ If Sendspin and `spin2dante` run on the same host, values as low as `1ms` can
 work well because there is very little upstream jitter between the source and
 the bridge. For more general deployments, especially when Sendspin is remote,
 `5ms` remains the recommended default.
+
+## DANTE Network Binding
+
+By default, Inferno chooses the host's default local IPv4 address for DANTE and
+mDNS traffic. If your DANTE devices are on a secondary NIC or VLAN without the
+default route, set `dante_bind` to that interface name or to the IPv4 address on
+that network.
+
+Examples:
+- `dante_bind: eth1`
+- `dante_bind: eth1.20`
+- `dante_bind: 192.168.50.2`
 
 ## Volume Control
 
