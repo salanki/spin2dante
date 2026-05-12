@@ -1,6 +1,6 @@
 # Changelog
 
-## PENDING — 2026-05-11
+## sha-cd19e61 — 2026-05-11
 
 ### Added
 - Configurable DANTE transmit latency (`--dante-latency` / `dante_latency`). Supported values: 0.5, 1, 2, 5, 10, 20 ms. Default: 10ms. Lower values reduce end-to-end audio delay; the value is advertised to Dante receivers as their minimum playout buffer.
