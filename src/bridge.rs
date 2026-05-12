@@ -10,7 +10,8 @@ use inferno_aoip::device_server::{DeviceServer, OwnedBuffer, RBInput, ReadPositi
 use log::{debug, error, info, warn};
 use sendspin::protocol::client::{AudioChunk, Connection, WsSender};
 use sendspin::protocol::messages::{
-    AudioFormatSpec, ClientState, ClientSyncState, Message, PlayerCommandType, PlayerV1Support,
+    AudioFormatSpec, ClientState, ClientSyncState, Message, PlayerCommandType, PlayerState,
+    PlayerV1Support,
 };
 use sendspin::sync::clock::ClockSync;
 use sendspin::{GainControl, ProtocolClientBuilder};
@@ -129,6 +130,7 @@ pub struct SendspinBridge {
     has_subscriber: bool,
     last_read_pos_change: Option<Instant>,
     pending_sync_state: Option<ClientSyncState>,
+    pending_player_state: bool,
 }
 
 impl SendspinBridge {
@@ -190,6 +192,7 @@ impl SendspinBridge {
             has_subscriber: false,
             last_read_pos_change: None,
             pending_sync_state: None,
+            pending_player_state: false,
         }
     }
 
@@ -291,17 +294,25 @@ impl SendspinBridge {
                     vec![]
                 },
             };
-            match ProtocolClientBuilder::builder()
+            let builder = ProtocolClientBuilder::builder()
                 .client_id(self.client_id.clone())
                 .name(self.device_name.clone())
                 .product_name(Some("spin2dante".to_string()))
                 .manufacturer(Some("spin2dante".to_string()))
                 .software_version(Some(env!("CARGO_PKG_VERSION").to_string()))
-                .player_v1_support(player_support)
-                .build()
-                .connect(&self.url)
-                .await
-            {
+                .player_v1_support(player_support);
+
+            let connect_result = if let Some(player_state) = self.current_player_state() {
+                builder
+                    .initial_player_state(player_state)
+                    .build()
+                    .connect(&self.url)
+                    .await
+            } else {
+                builder.build().connect(&self.url).await
+            };
+
+            match connect_result {
                 Ok(client) => break client,
                 Err(e) => {
                     warn!("connection failed: {e}, retrying in 2s...");
@@ -358,14 +369,11 @@ impl SendspinBridge {
                 }
             }
 
-            if let Some(state) = self.pending_sync_state.take() {
+            if let Some(state) = self.take_pending_client_state() {
                 if let Some(ref sender) = self.sender {
-                    let msg = Message::ClientState(ClientState {
-                        state: Some(state),
-                        player: None,
-                    });
+                    let msg = Message::ClientState(state);
                     if let Err(e) = sender.send_message(msg).await {
-                        warn!("failed to send player sync state: {e}");
+                        warn!("failed to send client state: {e}");
                     }
                 }
             }
@@ -416,6 +424,8 @@ impl SendspinBridge {
                         return;
                     }
 
+                    self.queue_player_state();
+
                     if self.state == BridgeState::Running
                         && self.stream_format.as_ref() == Some(&format)
                     {
@@ -444,25 +454,29 @@ impl SendspinBridge {
                 }
             }
             Message::StreamEnd(_) => {
+                self.queue_player_state();
                 info!("stream ended, entering idle (device stays on network)");
                 self.enter_idle();
             }
             Message::StreamClear(_) => {
+                self.queue_player_state();
                 info!("stream cleared, discarding buffered audio");
                 self.clear_and_rebuffer();
             }
             Message::ServerCommand(cmd) => {
-                if let (Some(gc), Some(player_cmd)) = (&self.gain_control, cmd.player) {
+                if let (Some(gc), Some(player_cmd)) = (self.gain_control.clone(), cmd.player) {
                     match player_cmd.command {
                         PlayerCommandType::Volume => {
                             if let Some(vol) = player_cmd.volume {
                                 gc.set_volume(vol);
+                                self.queue_player_state();
                                 info!("bridge volume set to {}", vol);
                             }
                         }
                         PlayerCommandType::Mute => {
                             if let Some(muted) = player_cmd.mute {
                                 gc.set_mute(muted);
+                                self.queue_player_state();
                                 info!("bridge mute set to {}", muted);
                             }
                         }
@@ -600,6 +614,40 @@ impl SendspinBridge {
         }
         info!("reporting player sync state: {:?}", state);
         self.pending_sync_state = Some(state);
+    }
+
+    fn queue_player_state(&mut self) {
+        if self.gain_control.is_some() {
+            self.pending_player_state = true;
+        }
+    }
+
+    fn current_player_state(&self) -> Option<PlayerState> {
+        self.gain_control.as_ref().map(|gc| PlayerState {
+            volume: Some(gc.volume()),
+            muted: Some(gc.is_muted()),
+            static_delay_ms: None,
+            supported_commands: None,
+        })
+    }
+
+    fn take_pending_client_state(&mut self) -> Option<ClientState> {
+        let state = self.pending_sync_state.take();
+        let include_player = self.pending_player_state || state.is_some();
+        self.pending_player_state = false;
+
+        if state.is_none() && !include_player {
+            return None;
+        }
+
+        Some(ClientState {
+            state,
+            player: if include_player {
+                self.current_player_state()
+            } else {
+                None
+            },
+        })
     }
 
     fn enter_idle(&mut self) {
