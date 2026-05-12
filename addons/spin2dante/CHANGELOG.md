@@ -10,6 +10,9 @@
 ### Added
 - Configurable DANTE transmit latency (`--dante-latency` / `dante_latency`). Supported values: 0.5, 1, 2, 5, 10, 20 ms. Default: 10ms. Lower values reduce end-to-end audio delay; the value is advertised to Dante receivers as their minimum playout buffer.
 
+### Fixed
+- Bridge now reports current volume and mute state back to Sendspin on connect and after each volume/mute change. Previously the server had no visibility into bridge-side gain state, so Music Assistant could show stale values after a reconnect.
+
 ## sha-aa6fc63 — 2026-04-27
 
 ### Added
