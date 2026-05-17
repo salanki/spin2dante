@@ -137,6 +137,9 @@ for ((i = 0; i < BRIDGE_COUNT; i++)); do
     if [[ "$report_dante_subscriber" == "true" ]]; then
         extra_args+=(--report-dante-subscriber)
     fi
+    if [[ "$volume_control" == "bridge" ]]; then
+        extra_args+=(--state-file "/data/volume_state_${id}.json")
+    fi
 
     bridge_env=(
         HOME="/data"

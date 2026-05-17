@@ -12,6 +12,7 @@
 
 ### Fixed
 - Bridge now reports current volume and mute state back to Sendspin on connect and after each volume/mute change. Previously the server had no visibility into bridge-side gain state, so Music Assistant could show stale values after a reconnect.
+- Bridge-side volume and mute state now persists across add-on restarts. Previously the bridge always started at 100% unmuted, losing any volume the user had set. State is saved to `/data/volume_state_<id>.json` and restored on startup.
 
 ## sha-aa6fc63 — 2026-04-27
 

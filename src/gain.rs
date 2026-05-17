@@ -18,12 +18,16 @@ pub(crate) struct BridgeGainRamp {
 
 impl BridgeGainRamp {
     pub(crate) fn new() -> Self {
+        Self::with_gain(1.0)
+    }
+
+    pub(crate) fn with_gain(gain: f32) -> Self {
         Self {
             ramp_duration_frames: SAMPLE_RATE * RAMP_DURATION_MS / 1000,
-            current_gain: 1.0,
+            current_gain: gain,
             ramp_frames_remaining: 0,
             ramp_step: 0.0,
-            last_target: 1.0,
+            last_target: gain,
         }
     }
 

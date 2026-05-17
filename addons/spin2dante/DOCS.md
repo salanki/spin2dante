@@ -123,6 +123,9 @@ controlled by the amplifier or via Home Assistant.
 Each bridge has independent volume state. You can enable `bridge` on zones that
 need it and leave `none` on zones where the amplifier handles volume.
 
+Volume and mute state persists across add-on restarts. When the bridge starts,
+it restores the last-known volume instead of defaulting to 100%.
+
 ## Clock Drift Correction
 
 spin2dante periodically compares the DANTE read position against the Sendspin

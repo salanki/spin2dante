@@ -5,6 +5,7 @@ use std::env;
 mod bridge;
 mod gain;
 mod metrics;
+mod state;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum VolumeControlMode {
@@ -109,6 +110,11 @@ struct Args {
     #[arg(long, value_enum, default_value_t = VolumeControlMode::None)]
     volume_control: VolumeControlMode,
 
+    /// Path to persist volume/mute state across restarts.
+    /// Only used when --volume-control=bridge.
+    #[arg(long)]
+    state_file: Option<String>,
+
     /// DANTE transmit latency in milliseconds. Advertised to receivers and
     /// determines their minimum playout buffer. Standard Dante values only.
     #[arg(long, value_enum, default_value = "10")]
@@ -131,8 +137,17 @@ async fn main() {
 
     let args = Args::parse();
 
+    let state_file = if args.volume_control == VolumeControlMode::Bridge {
+        args.state_file.map(std::path::PathBuf::from)
+    } else {
+        if args.state_file.is_some() {
+            log::warn!("--state-file is ignored when --volume-control is not 'bridge'");
+        }
+        None
+    };
+
     info!(
-        "spin2dante starting: url={} name={} buffer={}ms dante_latency={} drift_threshold={}ms drift_check_interval={}ms max_correction={}samples volume_control={:?} report_dante_subscriber={}",
+        "spin2dante starting: url={} name={} buffer={}ms dante_latency={} drift_threshold={}ms drift_check_interval={}ms max_correction={}samples volume_control={:?} state_file={:?} report_dante_subscriber={}",
         args.url,
         args.name,
         args.buffer_ms,
@@ -141,6 +156,7 @@ async fn main() {
         args.drift_check_interval_ms,
         args.max_correction_samples_per_tick,
         args.volume_control,
+        state_file,
         args.report_dante_subscriber,
     );
 
@@ -159,6 +175,7 @@ async fn main() {
         args.max_correction_samples_per_tick,
         client_id,
         args.volume_control,
+        state_file,
         args.report_dante_subscriber,
     );
 

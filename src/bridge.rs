@@ -134,6 +134,7 @@ pub struct SendspinBridge {
     last_read_pos_change: Option<Instant>,
     pending_sync_state: Option<ClientSyncState>,
     pending_player_state: bool,
+    state_file: Option<std::path::PathBuf>,
 }
 
 impl SendspinBridge {
@@ -147,13 +148,21 @@ impl SendspinBridge {
         max_correction_samples_per_tick: usize,
         client_id: String,
         volume_control: VolumeControlMode,
+        state_file: Option<std::path::PathBuf>,
         report_dante_subscriber: bool,
     ) -> Self {
         let prebuffer_target = ms_to_samples(buffer_ms);
-        let gain_control = if volume_control == VolumeControlMode::Bridge {
-            Some(GainControl::new(100, false))
+        let (gain_control, gain_ramp) = if volume_control == VolumeControlMode::Bridge {
+            let vs = state_file
+                .as_ref()
+                .map(|p| crate::state::load(p))
+                .unwrap_or_default();
+            info!("initial volume: {}%, muted: {}", vs.volume, vs.muted);
+            let gc = GainControl::new(vs.volume, vs.muted);
+            let ramp = BridgeGainRamp::with_gain(gc.gain());
+            (Some(gc), ramp)
         } else {
-            None
+            (None, BridgeGainRamp::new())
         };
         Self {
             url,
@@ -191,13 +200,14 @@ impl SendspinBridge {
             rebuffers: 0,
             drift_checks_skipped: 0,
             gain_control,
-            gain_ramp: BridgeGainRamp::new(),
+            gain_ramp,
             report_dante_subscriber,
             sender: None,
             has_subscriber: false,
             last_read_pos_change: None,
             pending_sync_state: None,
             pending_player_state: false,
+            state_file,
         }
     }
 
@@ -476,6 +486,7 @@ impl SendspinBridge {
                         PlayerCommandType::Volume => {
                             if let Some(vol) = player_cmd.volume {
                                 gc.set_volume(vol);
+                                self.save_volume_state(&gc);
                                 self.queue_player_state();
                                 info!("bridge volume set to {}", vol);
                             }
@@ -483,6 +494,7 @@ impl SendspinBridge {
                         PlayerCommandType::Mute => {
                             if let Some(muted) = player_cmd.mute {
                                 gc.set_mute(muted);
+                                self.save_volume_state(&gc);
                                 self.queue_player_state();
                                 info!("bridge mute set to {}", muted);
                             }
@@ -621,6 +633,12 @@ impl SendspinBridge {
         }
         info!("reporting player sync state: {:?}", state);
         self.pending_sync_state = Some(state);
+    }
+
+    fn save_volume_state(&self, gc: &GainControl) {
+        if let Some(ref path) = self.state_file {
+            crate::state::save(path, gc.volume(), gc.is_muted());
+        }
     }
 
     fn queue_player_state(&mut self) {
