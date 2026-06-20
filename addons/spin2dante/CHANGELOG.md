@@ -1,6 +1,6 @@
 # Changelog
 
-## sha-dfa841f — 2026-06-20
+## sha-e1383bf — 2026-06-20
 
 ### Changed
 - Bridge processes now cap their Tokio runtime to 2 worker threads by default (previously sized to the host CPU count). With one process per bridge this removes heavy thread oversubscription on the audio-bridge node (e.g. 19 bridges × 8 → ~152 worker threads on 8 cores), the overload root cause behind systemic multi-zone `flows_tx` "media clock jumped" dropouts. The timing-critical DANTE TX runs on inferno's own real-time thread, not the Tokio pool, so a small pool is sufficient. Overridable via the `SPIN2DANTE_WORKER_THREADS` environment variable.
