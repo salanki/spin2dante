@@ -1,5 +1,5 @@
 name: "statime"
-version: "edge"
+version: "sha-e1383bf"
 slug: statime
 description: >-
   Export a PTP clock for spin2dante and inferno-based Dante tools.
