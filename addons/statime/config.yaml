@@ -9,6 +9,10 @@ startup: system
 boot: auto
 init: false
 host_network: true
+# Grant CAP_SYS_NICE + rtprio ulimit so run.sh can put the PTP daemon on a
+# real-time (SCHED_FIFO) priority. Under CPU contention the clock daemon must not
+# be starved by the audio TX threads — see run.sh (chrt).
+realtime: true
 arch:
   - aarch64
   - amd64
