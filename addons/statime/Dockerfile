@@ -24,7 +24,7 @@ LABEL \
   org.opencontainers.image.source="https://github.com/salanki/spin2dante" \
   org.opencontainers.image.description="Home Assistant add-on for exporting a PTP clock socket for spin2dante and inferno-based Dante tools." \
   org.opencontainers.image.licenses="GPL-3.0-or-later OR AGPL-3.0-or-later"
-RUN apk add --no-cache libgcc iproute2
+RUN apk add --no-cache libgcc iproute2 util-linux
 COPY --from=builder /build/target/release/statime /usr/local/bin/statime
 COPY statime/statime-docker.toml /etc/statime.toml.template
 COPY addons/statime/run.sh /run.sh

@@ -130,8 +130,27 @@ struct Args {
     report_dante_subscriber: bool,
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // Tokio defaults the multi-thread runtime to num_cpus worker threads (8 on the
+    // audio-bridge VM). With one spin2dante process per bridge that is heavy
+    // oversubscription (e.g. 19 bridges x 8 = ~152 worker threads on 8 cores). The
+    // timing-critical DANTE TX runs on inferno's own SCHED_FIFO thread, not the tokio
+    // pool, so a small pool is plenty. Configurable via SPIN2DANTE_WORKER_THREADS
+    // (default 2).
+    let worker_threads = env::var("SPIN2DANTE_WORKER_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(2);
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads)
+        .enable_all()
+        .build()
+        .expect("failed to build tokio runtime")
+        .block_on(async_main());
+}
+
+async fn async_main() {
     let logenv = env_logger::Env::default().default_filter_or("info");
     env_logger::init_from_env(logenv);
 
