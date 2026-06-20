@@ -137,6 +137,13 @@ fn main() {
     // timing-critical DANTE TX runs on inferno's own SCHED_FIFO thread, not the tokio
     // pool, so a small pool is plenty. Configurable via SPIN2DANTE_WORKER_THREADS
     // (default 2).
+    //
+    // Why 2 and not 1: this binary spawns no tasks of its own (bridge::run is a single
+    // select! loop), but the sendspin transport runs its own background task that drives
+    // the WebSocket and feeds the message/audio channels. With a single worker that task
+    // shares a thread with the bridge loop, so an inline audio chunk decode+ring-write
+    // would stall the socket drain and back up the kernel receive buffer. Two workers let
+    // the transport keep draining while a chunk is processed. More than 2 just sits idle.
     let worker_threads = env::var("SPIN2DANTE_WORKER_THREADS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
