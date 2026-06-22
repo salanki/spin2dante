@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased — 2026-06-22
+
+### Added
+- New `server_buffer_ms` option (global, with optional per-bridge override) that sets the Sendspin `buffer_capacity` advertised in the player handshake — the server-side send-ahead credit, i.e. how far ahead Music Assistant may queue audio before it throttles. Default **2000 ms**.
+
+### Changed
+- The advertised `buffer_capacity` default is now **2 s**, up from a fixed ~200 ms in code (the design doc had said ~500 ms). spin2dante's previous 200 ms was far thinner than every other real Sendspin client (aiosendspin test client ~694 ms, benchmark client ~1.82 s, sendspin-rs default effectively unbounded), which left it uniquely prone to MA `Late binary … skipping` drops during MA event-loop / writer stalls > 200 ms. `buffer_capacity` is a send-ahead credit, **not** a prebuffer — raising it does not delay playback start or add steady-state latency.
+- The pending queue is now bounded by duration (`max_pending_frames`, derived from `server_buffer_ms`) instead of a fixed chunk count, so the larger send-ahead credit cannot overflow it regardless of chunk size. `MAX_PENDING_CHUNKS` remains only as an absolute backstop.
+
+> Maintainer note: set the real image sha as the version in `config.yaml` and this header on build/release.
+
 ## sha-e1383bf — 2026-06-20
 
 ### Changed

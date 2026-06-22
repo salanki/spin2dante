@@ -5,6 +5,7 @@ CLOCK_PATH="$(bashio::config 'clock_path')"
 WAIT_FOR_CLOCK_SECONDS="$(bashio::config 'wait_for_clock_seconds')"
 LOG_LEVEL="$(bashio::config 'log_level')"
 DANTE_BIND="$(bashio::config 'dante_bind')"
+SERVER_BUFFER_MS="$(bashio::config 'server_buffer_ms')"
 DRIFT_THRESHOLD_MS="$(bashio::config 'drift_threshold_ms')"
 DRIFT_CHECK_INTERVAL_MS="$(bashio::config 'drift_check_interval_ms')"
 MAX_CORRECTION_SAMPLES_PER_TICK="$(bashio::config 'max_correction_samples_per_tick')"
@@ -130,6 +131,8 @@ for ((i = 0; i < BRIDGE_COUNT; i++)); do
     mkdir -p "$tmpdir"
 
     dante_latency="$(jq -r ".bridges[$i].dante_latency // \"10\"" "$OPTIONS_FILE")"
+    # Per-bridge server_buffer_ms overrides the global default when present.
+    server_buffer_ms="$(jq -r ".bridges[$i].server_buffer_ms // \"$SERVER_BUFFER_MS\"" "$OPTIONS_FILE")"
     volume_control="$(jq -r ".bridges[$i].volume_control // \"none\"" "$OPTIONS_FILE")"
     report_dante_subscriber="$(jq -r ".bridges[$i].report_dante_subscriber // false" "$OPTIONS_FILE")"
 
@@ -151,12 +154,13 @@ for ((i = 0; i < BRIDGE_COUNT; i++)); do
         bridge_env+=(INFERNO_BIND_IP="$DANTE_BIND")
     fi
 
-    bashio::log.info "Starting bridge '$id' (${name}) on alt_port=${alt_port}, process_id=${process_id}, dante_latency=${dante_latency}, volume_control=${volume_control}"
+    bashio::log.info "Starting bridge '$id' (${name}) on alt_port=${alt_port}, process_id=${process_id}, dante_latency=${dante_latency}, server_buffer_ms=${server_buffer_ms}, volume_control=${volume_control}"
     env "${bridge_env[@]}" \
     /usr/local/bin/spin2dante \
         --url "$url" \
         --name "$name" \
         --buffer-ms "$buffer_ms" \
+        --server-buffer-ms "$server_buffer_ms" \
         --dante-latency "$dante_latency" \
         --drift-threshold-ms "$DRIFT_THRESHOLD_MS" \
         --drift-check-interval-ms "$DRIFT_CHECK_INTERVAL_MS" \

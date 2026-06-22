@@ -40,7 +40,7 @@ The bridge uses a fork of inferno_aoip (pinned to commit `5b1c9d1`) that adds `t
 
 Audio flows through two stages before reaching the DANTE network:
 
-1. **Pending queue** (`VecDeque<PendingChunk>`): Holds decoded PCM chunks keyed by server timestamp. Absorbs Sendspin's ahead-of-time buffering. Bounded by `MAX_PENDING_CHUNKS` (200).
+1. **Pending queue** (`VecDeque<PendingChunk>`): Holds decoded PCM chunks keyed by server timestamp. Absorbs Sendspin's ahead-of-time buffering. Bounded by duration via `max_pending_frames` (derived from `server_buffer_ms`), with `MAX_PENDING_CHUNKS` as an absolute chunk-count backstop.
 
 2. **Dante ring buffer** (`RBInput`, 16384 samples / ~341ms): Final local playout queue. FlowsTransmitter reads from here at PTP-synchronized timestamps.
 
@@ -48,7 +48,11 @@ The pending queue decouples chunk arrival from ring placement. Chunks are draine
 
 ### Buffer capacity
 
-The bridge advertises a small `buffer_capacity` (~500ms of stereo 24-bit PCM) via the Sendspin `PlayerV1Support` handshake, so the server doesn't send audio too far ahead of real-time.
+The bridge advertises a `buffer_capacity` via the Sendspin `PlayerV1Support` handshake. This is the server-side **send-ahead credit** — the amount of audio the Sendspin server (e.g. Music Assistant) may queue ahead of the playout deadline before it throttles. It is **not** a prebuffer or start delay (that is `buffer_ms`): playout still begins at the chunk's scheduled playout time regardless of the credit.
+
+The credit is configurable via `server_buffer_ms` (default **2000 ms**; previously a fixed ~200 ms in code, though this section historically said ~500 ms). A larger credit lets the server run further ahead and absorb its own event-loop / writer stalls before it has to drop chunks (which it logs as `Late binary … skipping`). The advertised byte count is computed at 24-bit depth (the larger of the two depths offered), so a negotiated 16-bit stream gets proportionally *more* headroom, never less.
+
+The extra lead is held in the pending queue, not the Dante ring: `drain_pending` only writes a chunk to the ring once its playout time falls within the ring's ~341 ms horizon, so a large credit does not overflow the ring in normal scheduled operation. The pending queue itself is bounded by `max_pending_frames` (≈ `2 × server_buffer_ms` + one ring horizon).
 
 ## Cross-Bridge Sync Architecture
 
