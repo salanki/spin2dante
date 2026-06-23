@@ -24,11 +24,18 @@ use crate::metrics::BufferMetrics;
 use crate::VolumeControlMode;
 
 pub const CHANNELS: usize = 2;
-pub const RING_BUFFER_SIZE: usize = 16384; // ~341ms at 48kHz, power of 2
+// Floor for the Dante playout ring. The actual size is derived per-bridge from
+// server_buffer_ms (see `SendspinBridge::new`): the server's send-ahead lead must
+// fit within one ring, because the scheduler horizon and the write/read
+// realignment guard are both keyed off the ring size. 16384 ≈ 341ms at 48kHz.
+pub const MIN_RING_BUFFER_SIZE: usize = 16384; // ~341ms at 48kHz, power of 2
 pub const SAMPLE_RATE: u32 = 48000;
 const METRICS_INTERVAL_SECS: u64 = 5;
 const HOLE_FIX_WAIT: usize = 4800; // ~100ms at 48kHz
-const MAX_PENDING_CHUNKS: usize = 200; // ~5s at 25 frames/chunk — bounds RAM usage
+// Absolute backstop on the pending-queue chunk count, independent of duration.
+// The real bound is duration/frames-based (see `max_pending_frames`, derived from
+// server_buffer_ms); this only guards against a pathological flood of tiny chunks.
+const MAX_PENDING_CHUNKS: usize = 4096;
 
 fn wrapsub(a: usize, b: usize) -> isize {
     (a as isize).wrapping_sub(b as isize)
@@ -88,6 +95,18 @@ pub struct SendspinBridge {
     device_name: String,
     client_id: String,
     buffer_ms: u32,
+    // Advertised Sendspin buffer_capacity expressed in ms of audio (send-ahead
+    // credit the server may queue before throttling). Converted to bytes in the
+    // PlayerV1Support handshake. See `max_pending_frames`.
+    server_buffer_ms: u32,
+    // Frames-based ceiling on the pending queue, derived from server_buffer_ms.
+    // Bounds how much ahead-of-time audio (and thus RAM) we hold regardless of
+    // chunk size, which is data-dependent.
+    max_pending_frames: usize,
+    // Dante playout ring size (power of 2), derived from server_buffer_ms so the
+    // server's send-ahead lead fits within one ring. Used as the scheduler write
+    // horizon and the write/read realignment threshold.
+    ring_buffer_size: usize,
     dante_latency_ns: u32,
     drift_threshold_samples: usize,
     drift_check_interval: Duration,
@@ -110,6 +129,9 @@ pub struct SendspinBridge {
     // Two-stage queue: Sendspin pending → Dante ring
     clock_sync: Option<Arc<Mutex<ClockSync>>>,
     pending_chunks: VecDeque<PendingChunk>,
+    // Running total of frames held in pending_chunks (kept in sync with every
+    // push/pop) so the queue can be bounded by duration, not chunk count.
+    pending_frames: usize,
     // Server-now anchor: set once, maps server_time → ring_position.
     // All targets computed relative to this anchor for stable spacing.
     anchor_server_us: Option<i64>,
@@ -142,6 +164,7 @@ impl SendspinBridge {
         url: String,
         device_name: String,
         buffer_ms: u32,
+        server_buffer_ms: u32,
         dante_latency_ns: u32,
         drift_threshold_ms: u32,
         drift_check_interval_ms: u64,
@@ -152,6 +175,23 @@ impl SendspinBridge {
         report_dante_subscriber: bool,
     ) -> Self {
         let prebuffer_target = ms_to_samples(buffer_ms);
+        // Size the Dante ring so the largest healthy write/read distance fits
+        // inside one ring. The scheduler only writes a chunk once its playout time
+        // is within one ring horizon, and the write/read realignment guard snaps
+        // when their distance exceeds the ring; both are keyed off the ring size,
+        // so if the lead exceeds one ring the bridge thrashes (snap loop). The
+        // anchor sits at read + prebuffer_target and chunks are placed up to the
+        // send-ahead lead (≈ server_buffer_ms) beyond that, so the max distance is
+        // prebuffer + lead. Use 2x that, rounded up to a power of 2 (inferno
+        // requires pow2), with the historical 341ms ring as a floor.
+        let ring_buffer_size = ((prebuffer_target + ms_to_samples(server_buffer_ms)) * 2)
+            .next_power_of_two()
+            .max(MIN_RING_BUFFER_SIZE);
+        // Allow the pending queue to hold up to 2x the advertised send-ahead
+        // (a well-behaved server stays within buffer_capacity; the extra factor
+        // absorbs jitter) plus one ring horizon. This bounds RAM by duration
+        // rather than by a fixed chunk count, which is data-dependent.
+        let max_pending_frames = ms_to_samples(server_buffer_ms) * 2 + ring_buffer_size;
         let (gain_control, gain_ramp) = if volume_control == VolumeControlMode::Bridge {
             let vs = state_file
                 .as_ref()
@@ -169,6 +209,9 @@ impl SendspinBridge {
             device_name,
             client_id,
             buffer_ms,
+            server_buffer_ms,
+            max_pending_frames,
+            ring_buffer_size,
             dante_latency_ns,
             drift_threshold_samples: ms_to_samples(drift_threshold_ms),
             drift_check_interval: Duration::from_millis(drift_check_interval_ms),
@@ -188,6 +231,7 @@ impl SendspinBridge {
             waiting_since: None,
             clock_sync: None,
             pending_chunks: VecDeque::new(),
+            pending_frames: 0,
             anchor_server_us: None,
             anchor_ring_pos: None,
             anchor_set_at: None,
@@ -264,7 +308,7 @@ impl SendspinBridge {
         let rb_inputs = server
             .transmit_from_owned_buffer(
                 CHANNELS,
-                RING_BUFFER_SIZE,
+                self.ring_buffer_size,
                 HOLE_FIX_WAIT,
                 start_rx,
                 self.current_timestamp.clone(),
@@ -286,9 +330,34 @@ impl SendspinBridge {
     async fn run_session(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let client = loop {
             info!("connecting to Sendspin server at {}", self.url);
-            // Advertise a small buffer_capacity so the server doesn't send
-            // audio too far ahead of real-time. The pending queue + ring need
-            // the server lead to fit within RING_BUFFER_SIZE (~341ms).
+            // buffer_capacity is the server-side send-ahead credit (bytes of
+            // audio the server may queue before throttling) — NOT a prebuffer or
+            // start delay (that is buffer_ms). A larger value lets the Sendspin
+            // server (e.g. Music Assistant) run further ahead, absorbing its own
+            // event-loop / writer stalls before it emits "Late binary … skipping"
+            // drops. The send-ahead lead is bounded in the pending queue by
+            // `max_pending_frames` and in the Dante ring by `ring_buffer_size`,
+            // both derived from server_buffer_ms: `drain_pending` only writes a
+            // chunk to the ring once its playout time is within one ring horizon,
+            // and the ring is sized (≈ 2x (prebuffer + lead)) so the credit fits. If the
+            // ring were too small for the lead, the write/read realignment guard
+            // would snap repeatedly (a startup thrash loop), so the ring must
+            // scale with the credit rather than the credit being capped to a
+            // fixed ~341ms ring.
+            //
+            // We compute bytes at 24-bit depth (3 B/sample), the larger of the
+            // two depths we offer. If the server negotiates 16-bit, the same byte
+            // count is ~1.5x longer in time — i.e. always >= server_buffer_ms of
+            // headroom, never less. u64 math avoids overflow at large values.
+            let buffer_capacity = (SAMPLE_RATE as u64
+                * CHANNELS as u64
+                * 3
+                * self.server_buffer_ms as u64
+                / 1000) as u32;
+            info!(
+                "advertising Sendspin buffer_capacity = {} bytes (~{} ms @24-bit)",
+                buffer_capacity, self.server_buffer_ms
+            );
             let player_support = PlayerV1Support {
                 supported_formats: vec![
                     AudioFormatSpec {
@@ -304,7 +373,7 @@ impl SendspinBridge {
                         bit_depth: 16,
                     },
                 ],
-                buffer_capacity: (SAMPLE_RATE as u32 * CHANNELS as u32 * 3 / 5), // ~200ms stereo 24-bit
+                buffer_capacity,
                 supported_commands: if self.gain_control.is_some() {
                     vec!["volume".to_string(), "mute".to_string()]
                 } else {
@@ -554,8 +623,18 @@ impl SendspinBridge {
         Some((read_pos, server_us))
     }
 
+    /// Pop the oldest pending chunk, keeping `pending_frames` in sync.
+    fn pop_pending_front(&mut self) -> Option<PendingChunk> {
+        let chunk = self.pending_chunks.pop_front();
+        if let Some(ref c) = chunk {
+            self.pending_frames = self.pending_frames.saturating_sub(c.frames);
+        }
+        chunk
+    }
+
     fn reset_scheduler(&mut self) {
         self.pending_chunks.clear();
+        self.pending_frames = 0;
         self.anchor_server_us = None;
         self.anchor_ring_pos = None;
         self.anchor_set_at = None;
@@ -598,7 +677,7 @@ impl SendspinBridge {
         let expected_read_pos = expected_read_pos(anchor_pos, self.prebuffer_target, elapsed_us);
         let drift_samples = wrapsub(actual_read_pos, expected_read_pos);
 
-        if drift_samples.abs() > (RING_BUFFER_SIZE / 4) as isize {
+        if drift_samples.abs() > (self.ring_buffer_size / 4) as isize {
             warn!(
                 "drift anomaly: drift={} samples actual_read_pos={} expected_read_pos={}, rebuffering",
                 drift_samples, actual_read_pos, expected_read_pos
@@ -676,14 +755,15 @@ impl SendspinBridge {
     }
 
     fn enter_idle(&mut self) {
+        let ring = self.ring_buffer_size;
         if let Some(inputs) = &mut self.rb_inputs {
-            let half = RING_BUFFER_SIZE / 2;
+            let half = ring / 2;
             for rb in inputs.iter_mut() {
                 let silence: Vec<Sample> = vec![0; half];
                 rb.write_from_at(self.write_pos, silence.clone().into_iter());
                 rb.write_from_at(self.write_pos.wrapping_add(half), silence.into_iter());
             }
-            self.write_pos = self.write_pos.wrapping_add(RING_BUFFER_SIZE);
+            self.write_pos = self.write_pos.wrapping_add(ring);
         }
         self.stream_format = None;
         self.prebuffer_written = 0;
@@ -772,7 +852,7 @@ impl SendspinBridge {
             } else {
                 wrapsub(read_pos, self.write_pos) as usize
             };
-            if distance > RING_BUFFER_SIZE {
+            if distance > self.ring_buffer_size {
                 info!(
                     "write/read misalignment (write={}, read={}, dist={}), snapping",
                     self.write_pos, read_pos, distance
@@ -783,19 +863,27 @@ impl SendspinBridge {
             }
         }
 
-        // Enqueue the chunk (bounded: drop oldest if queue overflows)
+        // Enqueue the chunk (bounded: drop oldest if queue overflows). The bound
+        // is primarily duration-based (max_pending_frames, from server_buffer_ms);
+        // MAX_PENDING_CHUNKS is an absolute backstop against tiny-chunk floods.
         self.pending_chunks.push_back(PendingChunk {
             timestamp_us: chunk.timestamp,
             frames,
             channel_samples,
         });
-        while self.pending_chunks.len() > MAX_PENDING_CHUNKS {
-            self.stale_drops += 1;
-            if let Some(gc) = &self.gain_control {
-                let dropped = self.pending_chunks.front().unwrap();
-                self.gain_ramp.advance(dropped.frames, gc.gain());
+        self.pending_frames += frames;
+        while self.pending_frames > self.max_pending_frames
+            || self.pending_chunks.len() > MAX_PENDING_CHUNKS
+        {
+            match self.pop_pending_front() {
+                Some(dropped) => {
+                    self.stale_drops += 1;
+                    if let Some(gc) = &self.gain_control {
+                        self.gain_ramp.advance(dropped.frames, gc.gain());
+                    }
+                }
+                None => break,
             }
-            self.pending_chunks.pop_front();
         }
         if self.pending_chunks.len() > self.queued_high_water {
             self.queued_high_water = self.pending_chunks.len();
@@ -892,7 +980,7 @@ impl SendspinBridge {
 
             // Too early: target beyond writable ring horizon
             let distance_from_read = wrapsub(target, read_pos);
-            if distance_from_read > (RING_BUFFER_SIZE - chunk.frames) as isize {
+            if distance_from_read > (self.ring_buffer_size - chunk.frames) as isize {
                 break; // leave queued, try next drain
             }
 
@@ -906,7 +994,7 @@ impl SendspinBridge {
                     "dropped stale chunk: ts={}, target={}, read_pos={}",
                     chunk.timestamp_us, target, read_pos
                 );
-                self.pending_chunks.pop_front();
+                self.pop_pending_front();
                 continue;
             }
 
@@ -920,7 +1008,7 @@ impl SendspinBridge {
                     "trimming {} stale samples, writing {} at read_pos={}",
                     trim, remaining, read_pos
                 );
-                let mut chunk = self.pending_chunks.pop_front().unwrap();
+                let mut chunk = self.pop_pending_front().unwrap();
                 self.write_trimmed_samples(&mut chunk.channel_samples, trim, remaining, read_pos);
                 if wrapsub(chunk_end, self.write_pos) > 0 {
                     self.write_pos = chunk_end;
@@ -930,7 +1018,7 @@ impl SendspinBridge {
             }
 
             // Large gap handling
-            if wrapsub(target, self.write_pos) > (RING_BUFFER_SIZE / 2) as isize {
+            if wrapsub(target, self.write_pos) > (self.ring_buffer_size / 2) as isize {
                 if !self.scheduler_settled {
                     // Scheduler activation: first chunks land far ahead of write_pos.
                     // The gap is just silence from snap_to_live — advance past it.
@@ -978,7 +1066,7 @@ impl SendspinBridge {
             }
 
             // Normal: write chunk at target
-            let mut chunk = self.pending_chunks.pop_front().unwrap();
+            let mut chunk = self.pop_pending_front().unwrap();
             self.write_samples_at(&mut chunk.channel_samples, chunk.frames, target);
             if wrapsub(chunk_end, self.write_pos) > 0 {
                 self.write_pos = chunk_end;
@@ -993,7 +1081,7 @@ impl SendspinBridge {
     /// Fallback: write pending chunks sequentially (clock sync not ready or read_pos=0).
     fn drain_sequential(&mut self) {
         let read_pos = self.get_read_pos();
-        while let Some(mut chunk) = self.pending_chunks.pop_front() {
+        while let Some(mut chunk) = self.pop_pending_front() {
             self.write_samples_at(&mut chunk.channel_samples, chunk.frames, self.write_pos);
             self.write_pos = self.write_pos.wrapping_add(chunk.frames);
             self.update_state_after_write(chunk.frames, read_pos);

@@ -89,6 +89,17 @@ struct Args {
     #[arg(long, default_value_t = 5)]
     buffer_ms: u32,
 
+    /// Sendspin server-side send-ahead buffer in milliseconds, advertised as
+    /// `buffer_capacity` in the player handshake.
+    ///
+    /// This is a flow-control ceiling: how far ahead the Sendspin server (e.g.
+    /// Music Assistant) may queue audio before it throttles. A larger value lets
+    /// the server run further ahead and absorb its own event-loop / writer stalls
+    /// before it drops chunks ("Late binary … skipping"). It is NOT a prebuffer
+    /// or start delay — that is `--buffer-ms`. Default 2000 ms.
+    #[arg(long, default_value_t = 2000, value_parser = clap::value_parser!(u32).range(50..=20000))]
+    server_buffer_ms: u32,
+
     /// Trigger in-place drift correction once offset exceeds this many ms.
     #[arg(long, default_value_t = 5)]
     drift_threshold_ms: u32,
@@ -173,10 +184,11 @@ async fn async_main() {
     };
 
     info!(
-        "spin2dante starting: url={} name={} buffer={}ms dante_latency={} drift_threshold={}ms drift_check_interval={}ms max_correction={}samples volume_control={:?} state_file={:?} report_dante_subscriber={}",
+        "spin2dante starting: url={} name={} buffer={}ms server_buffer={}ms dante_latency={} drift_threshold={}ms drift_check_interval={}ms max_correction={}samples volume_control={:?} state_file={:?} report_dante_subscriber={}",
         args.url,
         args.name,
         args.buffer_ms,
+        args.server_buffer_ms,
         args.dante_latency,
         args.drift_threshold_ms,
         args.drift_check_interval_ms,
@@ -195,6 +207,7 @@ async fn async_main() {
         args.url,
         args.name,
         args.buffer_ms,
+        args.server_buffer_ms,
         args.dante_latency.as_ns(),
         args.drift_threshold_ms,
         args.drift_check_interval_ms,

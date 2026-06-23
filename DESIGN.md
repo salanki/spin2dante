@@ -40,15 +40,19 @@ The bridge uses a fork of inferno_aoip (pinned to commit `5b1c9d1`) that adds `t
 
 Audio flows through two stages before reaching the DANTE network:
 
-1. **Pending queue** (`VecDeque<PendingChunk>`): Holds decoded PCM chunks keyed by server timestamp. Absorbs Sendspin's ahead-of-time buffering. Bounded by `MAX_PENDING_CHUNKS` (200).
+1. **Pending queue** (`VecDeque<PendingChunk>`): Holds decoded PCM chunks keyed by server timestamp. Absorbs Sendspin's ahead-of-time buffering. Bounded by duration via `max_pending_frames` (derived from `server_buffer_ms`), with `MAX_PENDING_CHUNKS` as an absolute chunk-count backstop.
 
-2. **Dante ring buffer** (`RBInput`, 16384 samples / ~341ms): Final local playout queue. FlowsTransmitter reads from here at PTP-synchronized timestamps.
+2. **Dante ring buffer** (`RBInput`): Final local playout queue. FlowsTransmitter reads from here at PTP-synchronized timestamps. Its size is derived per-bridge from `buffer_ms` + `server_buffer_ms` (≈ 2× the sum of the prebuffer and the send-ahead lead, rounded up to a power of 2, floored at 16384 samples / ~341ms) so the largest healthy write/read distance fits within one ring — see [Buffer capacity](#buffer-capacity).
 
 The pending queue decouples chunk arrival from ring placement. Chunks are drained to the ring when their server-time target falls within the ring's writable horizon.
 
 ### Buffer capacity
 
-The bridge advertises a small `buffer_capacity` (~500ms of stereo 24-bit PCM) via the Sendspin `PlayerV1Support` handshake, so the server doesn't send audio too far ahead of real-time.
+The bridge advertises a `buffer_capacity` via the Sendspin `PlayerV1Support` handshake. This is the server-side **send-ahead credit** — the amount of audio the Sendspin server (e.g. Music Assistant) may queue ahead of the playout deadline before it throttles. It is **not** a prebuffer or start delay (that is `buffer_ms`): playout still begins at the chunk's scheduled playout time regardless of the credit.
+
+The credit is configurable via `server_buffer_ms` (default **2000 ms**; previously a fixed ~200 ms in code, though this section historically said ~500 ms). A larger credit lets the server run further ahead and absorb its own event-loop / writer stalls before it has to drop chunks (which it logs as `Late binary … skipping`). The advertised byte count is computed at 24-bit depth (the larger of the two depths offered), so a negotiated 16-bit stream gets proportionally *more* headroom, never less.
+
+Because the scheduler writes a chunk to the ring only once its playout time is within one ring horizon, **and** the write/read realignment guard re-snaps whenever their distance exceeds the ring, the server's send-ahead lead must fit comfortably inside one ring — otherwise the front chunk is perpetually "too early," the ring underruns, and the bridge enters a snap/anchor thrash loop (which manifests as a fixed inter-bridge offset, breaking cross-bridge sync). The ring is therefore **sized from `buffer_ms` + `server_buffer_ms`** (≈ `2 × (buffer_ms + server_buffer_ms)`, rounded up to a power of 2, floored at ~341 ms — the anchor sits at `read + prebuffer` and chunks are placed up to the lead beyond that, so the ring must hold prebuffer + lead) rather than the credit being capped to a fixed ring. The lead lives across both the pending queue (bounded by `max_pending_frames` ≈ `2 × server_buffer_ms` + one ring) and the ring; neither can overflow, and the realignment guard never fires on a healthy lead. Ring memory scales with the credit (~2 MB/bridge at the 2000 ms default), with no effect on latency — playout remains timestamp-driven.
 
 ## Cross-Bridge Sync Architecture
 
@@ -276,4 +280,4 @@ The usrvclock protocol uses Unix datagram sockets in `$TMPDIR`. Docker container
 - **FLAC support**: When sendspin-rs gains FLAC decoding
 - **Drift compensation**: Sample insertion/dropping if fill deviates from target over long sessions
 - **Prometheus metrics**: Production monitoring endpoint
-- **Ring buffer sizing**: Currently 16384 samples (~341ms). Could be further tuned based on production latency requirements.
+- **Ring buffer sizing**: Derived per-bridge from `buffer_ms` + `server_buffer_ms` (≈ 2× their sum, rounded up to a power of 2, floored at 16384 samples / ~341ms). Could be further tuned based on production latency requirements.
