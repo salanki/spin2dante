@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — 2026-06-22
+## sha-9b05ab9 — 2026-06-22
 
 ### Added
 - New `server_buffer_ms` option (global, with optional per-bridge override) that sets the Sendspin `buffer_capacity` advertised in the player handshake — the server-side send-ahead credit, i.e. how far ahead Music Assistant may queue audio before it throttles. Default **2000 ms**.
@@ -9,8 +9,6 @@
 - The advertised `buffer_capacity` default is now **2 s**, up from a fixed ~200 ms in code (the design doc had said ~500 ms). spin2dante's previous 200 ms was far thinner than every other real Sendspin client (aiosendspin test client ~694 ms, benchmark client ~1.82 s, sendspin-rs default effectively unbounded), which left it uniquely prone to MA `Late binary … skipping` drops during MA event-loop / writer stalls > 200 ms. `buffer_capacity` is a send-ahead credit, **not** a prebuffer — raising it does not delay playback start or add steady-state latency.
 - The pending queue is now bounded by duration (`max_pending_frames`, derived from `server_buffer_ms`) instead of a fixed chunk count, so the larger send-ahead credit cannot overflow it regardless of chunk size. `MAX_PENDING_CHUNKS` remains only as an absolute backstop.
 - **The Dante ring buffer is now sized per-bridge from `buffer_ms` + `server_buffer_ms`** (≈ 2× their sum, rounded up to a power of 2, floored at the previous 16384 samples / ~341 ms). The scheduler write horizon and the write/read realignment guard are both keyed off the ring size, so the server's send-ahead lead must fit within one ring; with the old fixed ring a 2 s credit exceeded it and put the bridge into a snap/anchor thrash loop, breaking cross-bridge sync (a fixed ~100 ms inter-bridge offset). Sizing the ring from the credit fixes this. No latency impact (playout stays timestamp-driven); ring RAM scales with the credit (~2 MB/bridge at the 2 s default).
-
-> Maintainer note: set the real image sha as the version in `config.yaml` and this header on build/release.
 
 ## sha-e1383bf — 2026-06-20
 
