@@ -24,7 +24,11 @@ use crate::metrics::BufferMetrics;
 use crate::VolumeControlMode;
 
 pub const CHANNELS: usize = 2;
-pub const RING_BUFFER_SIZE: usize = 16384; // ~341ms at 48kHz, power of 2
+// Floor for the Dante playout ring. The actual size is derived per-bridge from
+// server_buffer_ms (see `SendspinBridge::new`): the server's send-ahead lead must
+// fit within one ring, because the scheduler horizon and the write/read
+// realignment guard are both keyed off the ring size. 16384 ≈ 341ms at 48kHz.
+pub const MIN_RING_BUFFER_SIZE: usize = 16384; // ~341ms at 48kHz, power of 2
 pub const SAMPLE_RATE: u32 = 48000;
 const METRICS_INTERVAL_SECS: u64 = 5;
 const HOLE_FIX_WAIT: usize = 4800; // ~100ms at 48kHz
@@ -99,6 +103,10 @@ pub struct SendspinBridge {
     // Bounds how much ahead-of-time audio (and thus RAM) we hold regardless of
     // chunk size, which is data-dependent.
     max_pending_frames: usize,
+    // Dante playout ring size (power of 2), derived from server_buffer_ms so the
+    // server's send-ahead lead fits within one ring. Used as the scheduler write
+    // horizon and the write/read realignment threshold.
+    ring_buffer_size: usize,
     dante_latency_ns: u32,
     drift_threshold_samples: usize,
     drift_check_interval: Duration,
@@ -167,11 +175,23 @@ impl SendspinBridge {
         report_dante_subscriber: bool,
     ) -> Self {
         let prebuffer_target = ms_to_samples(buffer_ms);
+        // Size the Dante ring so the largest healthy write/read distance fits
+        // inside one ring. The scheduler only writes a chunk once its playout time
+        // is within one ring horizon, and the write/read realignment guard snaps
+        // when their distance exceeds the ring; both are keyed off the ring size,
+        // so if the lead exceeds one ring the bridge thrashes (snap loop). The
+        // anchor sits at read + prebuffer_target and chunks are placed up to the
+        // send-ahead lead (≈ server_buffer_ms) beyond that, so the max distance is
+        // prebuffer + lead. Use 2x that, rounded up to a power of 2 (inferno
+        // requires pow2), with the historical 341ms ring as a floor.
+        let ring_buffer_size = ((prebuffer_target + ms_to_samples(server_buffer_ms)) * 2)
+            .next_power_of_two()
+            .max(MIN_RING_BUFFER_SIZE);
         // Allow the pending queue to hold up to 2x the advertised send-ahead
         // (a well-behaved server stays within buffer_capacity; the extra factor
         // absorbs jitter) plus one ring horizon. This bounds RAM by duration
         // rather than by a fixed chunk count, which is data-dependent.
-        let max_pending_frames = ms_to_samples(server_buffer_ms) * 2 + RING_BUFFER_SIZE;
+        let max_pending_frames = ms_to_samples(server_buffer_ms) * 2 + ring_buffer_size;
         let (gain_control, gain_ramp) = if volume_control == VolumeControlMode::Bridge {
             let vs = state_file
                 .as_ref()
@@ -191,6 +211,7 @@ impl SendspinBridge {
             buffer_ms,
             server_buffer_ms,
             max_pending_frames,
+            ring_buffer_size,
             dante_latency_ns,
             drift_threshold_samples: ms_to_samples(drift_threshold_ms),
             drift_check_interval: Duration::from_millis(drift_check_interval_ms),
@@ -287,7 +308,7 @@ impl SendspinBridge {
         let rb_inputs = server
             .transmit_from_owned_buffer(
                 CHANNELS,
-                RING_BUFFER_SIZE,
+                self.ring_buffer_size,
                 HOLE_FIX_WAIT,
                 start_rx,
                 self.current_timestamp.clone(),
@@ -314,11 +335,15 @@ impl SendspinBridge {
             // start delay (that is buffer_ms). A larger value lets the Sendspin
             // server (e.g. Music Assistant) run further ahead, absorbing its own
             // event-loop / writer stalls before it emits "Late binary … skipping"
-            // drops. The lead is held in `pending_chunks` (bounded by
-            // `max_pending_frames`), not the Dante ring: `drain_pending` only
-            // writes a chunk to the ring once its playout time is within the ring
-            // horizon (~341ms), so a large credit does not overflow the ring in
-            // normal scheduled operation.
+            // drops. The send-ahead lead is bounded in the pending queue by
+            // `max_pending_frames` and in the Dante ring by `ring_buffer_size`,
+            // both derived from server_buffer_ms: `drain_pending` only writes a
+            // chunk to the ring once its playout time is within one ring horizon,
+            // and the ring is sized (≈ 2x (prebuffer + lead)) so the credit fits. If the
+            // ring were too small for the lead, the write/read realignment guard
+            // would snap repeatedly (a startup thrash loop), so the ring must
+            // scale with the credit rather than the credit being capped to a
+            // fixed ~341ms ring.
             //
             // We compute bytes at 24-bit depth (3 B/sample), the larger of the
             // two depths we offer. If the server negotiates 16-bit, the same byte
@@ -652,7 +677,7 @@ impl SendspinBridge {
         let expected_read_pos = expected_read_pos(anchor_pos, self.prebuffer_target, elapsed_us);
         let drift_samples = wrapsub(actual_read_pos, expected_read_pos);
 
-        if drift_samples.abs() > (RING_BUFFER_SIZE / 4) as isize {
+        if drift_samples.abs() > (self.ring_buffer_size / 4) as isize {
             warn!(
                 "drift anomaly: drift={} samples actual_read_pos={} expected_read_pos={}, rebuffering",
                 drift_samples, actual_read_pos, expected_read_pos
@@ -730,14 +755,15 @@ impl SendspinBridge {
     }
 
     fn enter_idle(&mut self) {
+        let ring = self.ring_buffer_size;
         if let Some(inputs) = &mut self.rb_inputs {
-            let half = RING_BUFFER_SIZE / 2;
+            let half = ring / 2;
             for rb in inputs.iter_mut() {
                 let silence: Vec<Sample> = vec![0; half];
                 rb.write_from_at(self.write_pos, silence.clone().into_iter());
                 rb.write_from_at(self.write_pos.wrapping_add(half), silence.into_iter());
             }
-            self.write_pos = self.write_pos.wrapping_add(RING_BUFFER_SIZE);
+            self.write_pos = self.write_pos.wrapping_add(ring);
         }
         self.stream_format = None;
         self.prebuffer_written = 0;
@@ -826,7 +852,7 @@ impl SendspinBridge {
             } else {
                 wrapsub(read_pos, self.write_pos) as usize
             };
-            if distance > RING_BUFFER_SIZE {
+            if distance > self.ring_buffer_size {
                 info!(
                     "write/read misalignment (write={}, read={}, dist={}), snapping",
                     self.write_pos, read_pos, distance
@@ -954,7 +980,7 @@ impl SendspinBridge {
 
             // Too early: target beyond writable ring horizon
             let distance_from_read = wrapsub(target, read_pos);
-            if distance_from_read > (RING_BUFFER_SIZE - chunk.frames) as isize {
+            if distance_from_read > (self.ring_buffer_size - chunk.frames) as isize {
                 break; // leave queued, try next drain
             }
 
@@ -992,7 +1018,7 @@ impl SendspinBridge {
             }
 
             // Large gap handling
-            if wrapsub(target, self.write_pos) > (RING_BUFFER_SIZE / 2) as isize {
+            if wrapsub(target, self.write_pos) > (self.ring_buffer_size / 2) as isize {
                 if !self.scheduler_settled {
                     // Scheduler activation: first chunks land far ahead of write_pos.
                     // The gap is just silence from snap_to_live — advance past it.

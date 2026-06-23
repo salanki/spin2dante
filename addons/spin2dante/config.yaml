@@ -58,7 +58,7 @@ schema:
   wait_for_clock_seconds: int(0,300)
   log_level: list(trace|debug|info|warn|error)
   dante_bind: str
-  server_buffer_ms: int(50,8000)
+  server_buffer_ms: int(50,20000)
   drift_threshold_ms: int(0,250)
   drift_check_interval_ms: int(100,10000)
   max_correction_samples_per_tick: int(1,120)
@@ -67,7 +67,7 @@ schema:
       name: str
       url: str
       buffer_ms: int(1,5000)
-      server_buffer_ms: "int(50,8000)?"
+      server_buffer_ms: "int(50,20000)?"
       dante_latency: "list(0.5|1|2|5|10|20)?"
       volume_control: list(none|bridge)?
       process_id: int(1,65535)
