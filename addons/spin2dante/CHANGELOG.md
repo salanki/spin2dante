@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — 2026-06-23
+
+### Changed
+- Lowered the default `server_buffer_ms` from 2000 ms to **500 ms**. `buffer_capacity` also bounds volume/mute control latency — Music Assistant delivers control commands over the same Sendspin connection, *behind* the buffered audio, so worst-case control lag ≈ `server_buffer_ms`. Validated on a live 21-zone deployment: 2000 ms produced ~2.2 s mute/volume lag while 500 ms feels instant, with **zero** late-binary skips at either value (deepest send-ahead observed ~360 ms). 500 ms balances ~2.5× the old 200 ms skip headroom against snappy controls. Raise for more skip tolerance (slower volume); lower for the opposite. (The gain is applied bridge-side at drain, after the pending queue, so the buffer never pre-attenuates audio — the lag is purely the control message queued behind audio in MA.)
+
+> Maintainer note: set the real image sha as the version in `config.yaml` and this header on build/release.
+
 ## sha-9b05ab9 — 2026-06-22
 
 ### Added
