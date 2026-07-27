@@ -14,6 +14,16 @@ env:
   STATIME_REF: inferno-dev
 
 jobs:
+  test-audio-analyzer:
+    name: Test audio artifact analyzer
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Run analyzer tests
+        run: make test-analyzer
+
   build-binaries:
     name: Build ${{ matrix.artifact_name }} (${{ matrix.archive_suffix }})
     runs-on: ubuntu-latest

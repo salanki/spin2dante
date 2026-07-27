@@ -60,6 +60,9 @@ Notes:
 ## Quick Start
 
 ```sh
+# Fast offline analyzer tests (no Docker required)
+make test-analyzer
+
 # Single-stream E2E test (1 bridge, 1 receiver)
 make test
 
@@ -80,6 +83,48 @@ make test INFERNO_DIR=/path/to/inferno
 ```
 
 The Makefile handles building the bridge image, the inferno2pipe image (with submodule init), the Music Assistant helper workflow, and the docker-compose based test runs.
+
+## Audio Artifact Analyzer (`make test-analyzer`)
+
+`test/common/audio_artifact_analyzer.py` compares an interleaved signed-i32
+capture with the deterministic reference and reports local discontinuities
+instead of reducing the whole capture to pass/fail after the first differing
+sample. It classifies:
+
+- `zero_gap`: zero frames inserted into the capture
+- `duplicate`: one or more repetitions of the preceding capture frame
+- `insertion`: other extra capture frames
+- `drop`: reference frames absent from the capture
+- `mutation`: samples that differ without a nearby timing re-alignment
+
+The analyzer searches up to 64 frames for a re-alignment and requires eight
+following frames to match, avoiding false classification from a single
+coincidental sample. Its JSON result includes event locations and durations,
+frame totals by kind, the largest correction, and the largest boundary
+discontinuity normalized to signed-i32 full scale.
+
+The default quality gate permits a one-frame duplicate or drop, representing
+the smallest possible discrete correction. It rejects zero-fill, arbitrary
+sample mutation, and any timing correction longer than one frame. Override the
+size threshold with `--allowed-event-frames`.
+
+```sh
+python3 test/common/audio_artifact_analyzer.py \
+  --reference test-shared/reference_capture.raw \
+  --capture test-shared/capture.raw \
+  --json
+```
+
+The command exits nonzero when the capture violates the quality gate, so it can
+be added to an E2E validator. The unit suite includes a regression fixture for
+the bridge's current anchor-shift behavior: inserting 12 zero frames is
+classified as a 0.25 ms `zero_gap` and rejected. This makes the audible-risk
+behavior measurable without listening, while keeping CI green by asserting
+that the analyzer detects it.
+
+Like the existing bit-perfect comparator, analysis starts at the first exact
+alignment window. An artifact before that window or in an unmatched trailing
+suffix is outside the analyzed interval.
 
 ## Interactive Music Assistant Test (`make test-ma-interactive`)
 
@@ -475,6 +520,7 @@ Tested and validated via `make test-resilience`:
 ## Known Limitations
 
 - **Bit-perfect over overlap, not full-boundary perfection**: The automated check allows an unknown dropped prefix/suffix. It proves the received overlap matches exactly, but it does not require sample 0 of the source to be present.
+- **Artifact analysis begins at exact alignment**: The offline artifact analyzer can localize corrections after its first exact 64-frame alignment window. It cannot classify an artifact hidden in an unmatched startup prefix or trailing suffix.
 - **Sendspin source is 16-bit**: The `sendspin serve` CLI hardcodes its audio decoder to `s16` (16-bit signed) via PyAV, regardless of the input file's bit depth. A 24-bit WAV is truncated to 16-bit before being sent as "24-bit PCM." The test reference signal is generated at 16-bit to match this reality. True 24-bit end-to-end testing requires a Sendspin server that preserves 24-bit samples.
 - **PTP clock warmup**: 10-15s of "clock unavailable" is normal while the Statime follower syncs to the master. The bridge auto-realigns once the clock becomes available.
 - **Single-run test audio**: The 30s deterministic reference loops only if sendspin loops it. After 30s, the stream may end.

@@ -2,11 +2,15 @@ INFERNO_DIR ?= ../inferno
 MUSIC_ASSISTANT_COMPOSE ?= test/music_assistant/docker-compose.yml
 MUSIC_ASSISTANT_DOCKER_CONFIG ?= /tmp/music-assistant-docker-config
 
-.PHONY: build test test-multi test-sync-verify test-resilience test-volume test-ma-interactive ma-up ma-down ma-logs clean
+.PHONY: build test-analyzer test test-multi test-sync-verify test-resilience test-volume test-ma-interactive ma-up ma-down ma-logs clean
 
 ## Build the bridge Docker image
 build:
 	docker build -t spin2dante .
+
+## Run fast offline tests for timing-correction artifact detection
+test-analyzer:
+	python3 -m unittest discover -s test/common -p 'test_*.py' -v
 
 ## Build the inferno2pipe image (required once before tests)
 inferno2pipe:
