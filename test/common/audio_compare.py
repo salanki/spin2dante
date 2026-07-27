@@ -54,6 +54,7 @@ def iter_candidate_starts(first_nonzero: int, max_start: int):
 
 def find_alignment(reference: bytes, capture: bytes, frame_bytes: int, window_frames: int, probe_frames: int):
     capture_frames = len(capture) // frame_bytes
+    reference_frames = len(reference) // frame_bytes
     max_start = min(max(capture_frames - window_frames, 0), probe_frames)
 
     first_nonzero = None
@@ -66,12 +67,29 @@ def find_alignment(reference: bytes, capture: bytes, frame_bytes: int, window_fr
     if first_nonzero is None:
         return None, None
 
-    for capture_start in iter_candidate_starts(first_nonzero, max_start):
-        if not is_nonzero_frame(capture, capture_start, frame_bytes):
-            continue
-        match = try_match_window(reference, capture, frame_bytes, capture_start, window_frames)
-        if match is not None:
-            return match
+    # Index one frame out of every 64 in the reference. Scanning capture frames
+    # against this sparse index is O(reference + capture), while repeatedly
+    # calling bytes.find() for every candidate becomes prohibitively expensive
+    # on minute-long captures. A true alignment necessarily crosses a reference
+    # frame on the 64-frame grid; verify the full window before accepting it.
+    reference_index = {}
+    reference_last_start = reference_frames - window_frames
+    for reference_start in range(0, reference_last_start + 1, 64):
+        start_byte = reference_start * frame_bytes
+        key = reference[start_byte:start_byte + frame_bytes]
+        reference_index.setdefault(key, []).append(reference_start)
+
+    window_bytes = window_frames * frame_bytes
+    for capture_start in range(first_nonzero, max_start + 1):
+        start_byte = capture_start * frame_bytes
+        key = capture[start_byte:start_byte + frame_bytes]
+        for reference_start in reference_index.get(key, ()):
+            reference_byte = reference_start * frame_bytes
+            if (
+                capture[start_byte:start_byte + window_bytes]
+                == reference[reference_byte:reference_byte + window_bytes]
+            ):
+                return capture_start, reference_start
 
     return None, None
 
@@ -124,8 +142,33 @@ def analyze(
     ref_overlap = reference[reference_first * frame_bytes:(reference_first * frame_bytes) + overlap_bytes]
     cap_overlap = capture[capture_first * frame_bytes:(capture_first * frame_bytes) + overlap_bytes]
     exact_overlap = ref_overlap == cap_overlap
+    matched_frames = 0
+    run_count = 0
+    current_run_frames = 0
+    current_run_start = 0
+    longest_run_frames = 0
+    longest_run_start = None
 
-    matched_frames = overlap_frames if exact_overlap else 0
+    for frame_index in range(overlap_frames):
+        byte_start = frame_index * frame_bytes
+        byte_end = byte_start + frame_bytes
+        if ref_overlap[byte_start:byte_end] == cap_overlap[byte_start:byte_end]:
+            matched_frames += 1
+            if current_run_frames == 0:
+                current_run_start = frame_index
+                run_count += 1
+            current_run_frames += 1
+            if current_run_frames > longest_run_frames:
+                longest_run_frames = current_run_frames
+                longest_run_start = current_run_start
+        else:
+            current_run_frames = 0
+
+    longest_run_end = (
+        longest_run_start + longest_run_frames
+        if longest_run_start is not None
+        else None
+    )
 
     result = {
         "alignment_found": True,
@@ -138,23 +181,25 @@ def analyze(
         "overlap_frames": overlap_frames,
         "matched_frames": matched_frames,
         "match_ratio": (matched_frames / overlap_frames) if overlap_frames else 0.0,
-        "run_count": 1 if exact_overlap else 0,
-        "longest_run_frames": overlap_frames if exact_overlap else 0,
-        "longest_run_seconds": overlap_frames / sample_rate if exact_overlap else 0.0,
-        "longest_run_start_frame": 0 if exact_overlap else None,
-        "longest_run_end_frame": overlap_frames if exact_overlap else None,
+        "run_count": run_count,
+        "longest_run_frames": longest_run_frames,
+        "longest_run_seconds": longest_run_frames / sample_rate,
+        "longest_run_start_frame": longest_run_start,
+        "longest_run_end_frame": longest_run_end,
         "single_contiguous_match": exact_overlap,
     }
 
     if overlap_frames < min_run_frames:
         result["pass"] = False
         result["reason"] = f"overlap too short ({overlap_frames} frames)"
-    elif not exact_overlap:
+    elif longest_run_frames < min_run_frames:
         result["pass"] = False
-        result["reason"] = "overlap differs from reference"
+        result["reason"] = (
+            f"no bit-perfect run of at least {min_run_frames} frames"
+        )
     else:
         result["pass"] = True
-        result["reason"] = "bit-perfect overlap found"
+        result["reason"] = "bit-perfect run found"
 
     return result
 

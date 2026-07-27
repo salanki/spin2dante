@@ -13,51 +13,63 @@ from audio_compare import find_alignment
 INT32_FULL_SCALE = (1 << 31) - 1
 
 
-def decode_frames(audio: bytes, channels: int):
-    frame_bytes = channels * 4
-    if len(audio) % frame_bytes:
-        raise ValueError(
-            f"audio length {len(audio)} is not a whole number of {frame_bytes}-byte frames"
-        )
-
-    frame_format = struct.Struct("<" + ("i" * channels))
-    return [
-        frame_format.unpack_from(audio, offset)
-        for offset in range(0, len(audio), frame_bytes)
-    ]
-
-
-def frames_match(reference, reference_start, capture, capture_start, count):
+def frames_match(
+    reference,
+    reference_start,
+    capture,
+    capture_start,
+    count,
+    frame_bytes,
+):
+    reference_frames = len(reference) // frame_bytes
+    capture_frames = len(capture) // frame_bytes
     if (
-        reference_start + count > len(reference)
-        or capture_start + count > len(capture)
+        reference_start + count > reference_frames
+        or capture_start + count > capture_frames
     ):
         return False
+    reference_byte = reference_start * frame_bytes
+    capture_byte = capture_start * frame_bytes
+    length = count * frame_bytes
     return (
-        reference[reference_start:reference_start + count]
-        == capture[capture_start:capture_start + count]
+        reference[reference_byte:reference_byte + length]
+        == capture[capture_byte:capture_byte + length]
     )
 
 
-def classify_insertion(inserted, previous_frame):
-    zero_frame = (0,) * len(inserted[0])
-    if all(frame == zero_frame for frame in inserted):
+def classify_insertion(capture, capture_start, count, frame_bytes):
+    start_byte = capture_start * frame_bytes
+    end_byte = start_byte + count * frame_bytes
+    inserted = capture[start_byte:end_byte]
+    if not any(inserted):
         return "zero_gap"
-    if previous_frame is not None and all(frame == previous_frame for frame in inserted):
-        return "duplicate"
+    if capture_start:
+        previous_start = start_byte - frame_bytes
+        previous_frame = capture[previous_start:start_byte]
+        if inserted == previous_frame * count:
+            return "duplicate"
     return "insertion"
 
 
-def boundary_discontinuity(capture, boundary):
-    if boundary <= 0 or boundary >= len(capture):
+def boundary_discontinuity(capture, boundary, frame_bytes, channels):
+    capture_frames = len(capture) // frame_bytes
+    if boundary <= 0 or boundary >= capture_frames:
         return 0
-    return max(
-        abs(after - before)
-        for before, after in zip(capture[boundary - 1], capture[boundary])
-    )
+    frame_format = struct.Struct("<" + ("i" * channels))
+    before = frame_format.unpack_from(capture, (boundary - 1) * frame_bytes)
+    after = frame_format.unpack_from(capture, boundary * frame_bytes)
+    return max(abs(after_sample - before_sample) for before_sample, after_sample in zip(before, after))
 
 
-def find_resync(reference, capture, reference_pos, capture_pos, lookahead, resync_frames):
+def find_resync(
+    reference,
+    capture,
+    reference_pos,
+    capture_pos,
+    lookahead,
+    resync_frames,
+    frame_bytes,
+):
     candidates = []
     for skipped in range(1, lookahead + 1):
         if frames_match(
@@ -66,6 +78,7 @@ def find_resync(reference, capture, reference_pos, capture_pos, lookahead, resyn
             capture,
             capture_pos + skipped,
             resync_frames,
+            frame_bytes,
         ):
             candidates.append((skipped, "insertion"))
         if frames_match(
@@ -74,6 +87,7 @@ def find_resync(reference, capture, reference_pos, capture_pos, lookahead, resyn
             capture,
             capture_pos,
             resync_frames,
+            frame_bytes,
         ):
             candidates.append((skipped, "drop"))
 
@@ -130,25 +144,35 @@ def analyze_artifacts(
             "events": [],
         }
 
-    reference = decode_frames(reference_bytes, channels)
-    capture = decode_frames(capture_bytes, channels)
+    if len(reference_bytes) % frame_bytes or len(capture_bytes) % frame_bytes:
+        raise ValueError(
+            f"audio length is not a whole number of {frame_bytes}-byte frames"
+        )
+    reference_frames = len(reference_bytes) // frame_bytes
+    capture_frames = len(capture_bytes) // frame_bytes
     reference_pos = reference_start
     capture_pos = capture_start
     events = []
 
-    while reference_pos < len(reference) and capture_pos < len(capture):
-        if reference[reference_pos] == capture[capture_pos]:
+    while reference_pos < reference_frames and capture_pos < capture_frames:
+        reference_byte = reference_pos * frame_bytes
+        capture_byte = capture_pos * frame_bytes
+        if (
+            reference_bytes[reference_byte:reference_byte + frame_bytes]
+            == capture_bytes[capture_byte:capture_byte + frame_bytes]
+        ):
             reference_pos += 1
             capture_pos += 1
             continue
 
         resync = find_resync(
-            reference,
-            capture,
+            reference_bytes,
+            capture_bytes,
             reference_pos,
             capture_pos,
             lookahead_frames,
             resync_frames,
+            frame_bytes,
         )
         if resync is None:
             event_frames = 1
@@ -159,8 +183,10 @@ def analyze_artifacts(
             event_frames, direction = resync
             if direction == "insertion":
                 kind = classify_insertion(
-                    capture[capture_pos:capture_pos + event_frames],
-                    capture[capture_pos - 1] if capture_pos else None,
+                    capture_bytes,
+                    capture_pos,
+                    event_frames,
+                    frame_bytes,
                 )
                 next_reference_pos = reference_pos
                 next_capture_pos = capture_pos + event_frames
@@ -170,8 +196,18 @@ def analyze_artifacts(
                 next_capture_pos = capture_pos
 
         peak = max(
-            boundary_discontinuity(capture, capture_pos),
-            boundary_discontinuity(capture, next_capture_pos),
+            boundary_discontinuity(
+                capture_bytes,
+                capture_pos,
+                frame_bytes,
+                channels,
+            ),
+            boundary_discontinuity(
+                capture_bytes,
+                next_capture_pos,
+                frame_bytes,
+                channels,
+            ),
         )
         events.append(
             {
@@ -187,6 +223,8 @@ def analyze_artifacts(
         capture_pos = next_capture_pos
 
     events = coalesce_mutations(events)
+    for event in events:
+        event["duration_ms"] = event["frames"] * 1000.0 / sample_rate
     counts = Counter()
     for event in events:
         counts[event["kind"]] += event["frames"]

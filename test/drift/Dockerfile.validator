@@ -1,0 +1,8 @@
+FROM python:3.13-slim
+RUN pip install --no-cache-dir netaudio
+COPY common/audio_compare.py /audio_compare.py
+COPY common/audio_artifact_analyzer.py /audio_artifact_analyzer.py
+COPY drift/validate.py /validate.py
+COPY drift/validate.sh /validate.sh
+RUN chmod +x /validate.sh
+ENTRYPOINT ["/validate.sh"]

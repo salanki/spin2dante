@@ -71,6 +71,11 @@ jobs:
           workspaces: |
             ${{ matrix.source_dir }} -> target
 
+      - name: Run spin2dante unit tests
+        if: matrix.artifact_name == 'spin2dante'
+        working-directory: ${{ matrix.source_dir }}
+        run: cargo test --release --target ${{ matrix.target }}
+
       - name: Build release binary
         working-directory: ${{ matrix.source_dir }}
         run: ${{ matrix.build_command }}

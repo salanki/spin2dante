@@ -63,6 +63,9 @@ Notes:
 # Fast offline analyzer tests (no Docker required)
 make test-analyzer
 
+# Deterministic clock-drift correction through real PTP and DANTE capture
+make test-drift
+
 # Single-stream E2E test (1 bridge, 1 receiver)
 make test
 
@@ -117,14 +120,81 @@ python3 test/common/audio_artifact_analyzer.py \
 
 The command exits nonzero when the capture violates the quality gate, so it can
 be added to an E2E validator. The unit suite includes a regression fixture for
-the bridge's current anchor-shift behavior: inserting 12 zero frames is
-classified as a 0.25 ms `zero_gap` and rejected. This makes the audible-risk
-behavior measurable without listening, while keeping CI green by asserting
-that the analyzer detects it.
+the former anchor-shift behavior: inserting 12 zero frames is classified as a
+0.25 ms `zero_gap` and rejected. This makes that audible-risk behavior
+measurable without listening.
 
 Like the existing bit-perfect comparator, analysis starts at the first exact
 alignment window. An artifact before that window or in an unmatched trailing
 suffix is outside the analyzed interval.
+
+The bit-perfect comparator reports both the overall frame match ratio and the
+longest contiguous exact run. Its gate passes when that longest run meets
+`--min-run-seconds`; a short capture-path mutation is still reported, but no
+longer erases evidence of the valid audio before or after it.
+
+## Deterministic Drift Correction (`make test-drift`)
+
+This test exercises the production bridge and DANTE transmit/receive path,
+rather than calling the correction helper in isolation:
+
+- A custom Sendspin server responds to the normal clock-sync exchange but runs
+  its advertised clock at `-250 ppm`.
+- The server emits deterministic 24-bit stereo PCM and a matching signed-i32
+  reference.
+- The real bridge is clocked by the test PTPv2 follower and sends through
+  Inferno/DANTE to `inferno2pipe`.
+- After discovery and subscription, the validator captures 35 seconds, parses
+  the bridge's correction log, and runs the artifact analyzer.
+
+The bridge uses sendspin-rs `CorrectionPlanner` for its deadband, hysteresis,
+reanchor decision, and correction cadence. It applies that plan to complete
+stereo frames in the pending audio: a slow source timeline repeats the
+preceding frame, while a fast source timeline drops a frame. Each applied
+correction moves the scheduler anchor by the same single-frame amount, so
+future chunks remain contiguous instead of exposing unwritten ring-buffer
+samples as silence.
+
+Drift measurements use a three-sample median before reaching the planner. This
+rejects a one-tick PTP/read-position outlier without hiding sustained drift.
+Planner cadence changes in the same direction preserve the correction
+counter's progress.
+
+The deterministic test settings are:
+
+| Setting | Value |
+|---|---:|
+| Sendspin clock skew | `-250 ppm` |
+| `--buffer-ms` | `5` |
+| `--server-buffer-ms` | `2000` |
+| `--drift-threshold-ms` | `1` |
+| `--drift-check-interval-ms` | `250` |
+| `--max-correction-samples-per-tick` | `12` |
+| Capture interval | `35 s` |
+
+The correction-specific gate requires observed single-frame duplicates, no
+wrong-direction corrections, no multi-frame duplicate/drop/insertion event,
+and no 12-frame zero gap associated with the old anchor shift. The analyzer
+also reports the stricter full-capture quality result. On an overloaded Docker
+host, Inferno may log `tx lag ... dropout occurs!` and create unrelated,
+usually isolated capture gaps; these remain visible in the JSON report but do
+not masquerade as bridge correction failures.
+
+Detailed results are written to `/shared/drift_analysis.json` in the Compose
+`shared` volume. Preserve a failed run for inspection by avoiding
+`make clean`; `make test-drift` removes containers but not the volume.
+
+The validated local run on 2026-07-27 applied 462 inserts and no drops during
+the capture. The analyzer found 459 isolated one-frame duplicates and no
+batched zero gap; two isolated zero frames and larger mutation regions
+coincided with 22 Inferno `tx lag` reports, so the correction gate passed while
+the intentionally stricter whole-capture gate continued to report the
+host-transport artifacts.
+
+The netaudio-based validators use `python:3.13-slim`. Netaudio publishes a
+compatible manylinux wheel, but no musllinux wheel for Python 3.13; Alpine
+therefore attempts a source build and requires a Rust toolchain. A newer Alpine
+base does not remove that packaging distinction.
 
 ## Interactive Music Assistant Test (`make test-ma-interactive`)
 

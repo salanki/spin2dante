@@ -37,6 +37,16 @@ class ArtifactAnalyzerTest(unittest.TestCase):
         self.assertTrue(result["quality_pass"])
         self.assertEqual(result["events"], [])
 
+    def test_alignment_skips_capture_startup_silence(self):
+        reference = signal()
+        capture = [(0, 0)] * 137 + reference
+
+        result = self.analyze(reference, capture)
+
+        self.assertTrue(result["quality_pass"])
+        self.assertEqual(result["capture_start_frame"], 137)
+        self.assertEqual(result["reference_start_frame"], 0)
+
     def test_current_anchor_shift_zero_fill_is_rejected(self):
         reference = signal()
         correction_frame = 128
