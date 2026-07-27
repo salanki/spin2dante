@@ -4,6 +4,7 @@ set -e
 STREAM_COUNT=4
 RECORD_SECS=20
 COMPARE_JSON=/tmp/compare_results.jsonl
+ARTIFACT_JSON=/shared/multi_artifacts.jsonl
 SYNC_THRESHOLD_FRAMES=48
 
 echo "=== spin2dante Multi-Stream E2E Test (${STREAM_COUNT} streams) ==="
@@ -72,7 +73,7 @@ total=0
 ok=0
 bit_perfect=0
 min_size=$((5 * 48000 * 2 * 4))  # at least 5s of audio
-rm -f "$COMPARE_JSON"
+rm -f "$COMPARE_JSON" "$ARTIFACT_JSON"
 
 for i in $(seq 1 $STREAM_COUNT); do
     total=$((total + 1))
@@ -92,6 +93,7 @@ for i in $(seq 1 $STREAM_COUNT); do
 
     ok=$((ok + 1))
 
+    compare_pass=0
     if python3 /audio_compare.py \
         --reference /shared/reference_capture.raw \
         --capture "$file" \
@@ -99,6 +101,7 @@ for i in $(seq 1 $STREAM_COUNT); do
         --min-run-seconds 5 \
         --json > /tmp/compare_${padded}.json
     then
+        compare_pass=1
         bit_perfect=$((bit_perfect + 1))
         cat /tmp/compare_${padded}.json >> "$COMPARE_JSON"
         echo "  capture_${padded}.raw: ${size} bytes, bit-perfect overlap=YES"
@@ -106,7 +109,28 @@ for i in $(seq 1 $STREAM_COUNT); do
         cat /tmp/compare_${padded}.json >> "$COMPARE_JSON" 2>/dev/null || true
         echo "  capture_${padded}.raw: ${size} bytes, bit-perfect overlap=NO"
     fi
+
+    artifact_status=0
+    python3 /audio_artifact_analyzer.py \
+        --reference /shared/reference_capture.raw \
+        --capture "$file" \
+        --json > /tmp/artifact_${padded}.json || artifact_status=$?
+    cat /tmp/artifact_${padded}.json >> "$ARTIFACT_JSON"
+    python3 -c "
+import json
+with open('/tmp/artifact_${padded}.json', encoding='utf-8') as result_file:
+    result = json.load(result_file)
+print(
+    '  capture_${padded}.raw artifacts: '
+    f'events={result.get(\"event_count\", 0)} '
+    f'frames_by_kind={result.get(\"event_frames_by_kind\", {})} '
+    f'quality_pass={result.get(\"quality_pass\", False)}'
+)
+"
+    echo "  artifact attribution status=${artifact_status} (diagnostic only; comparator_pass=${compare_pass})"
 done
+
+echo "Artifact reports: ${ARTIFACT_JSON}"
 
 echo ""
 echo "=== Anchor sync_key comparison ==="

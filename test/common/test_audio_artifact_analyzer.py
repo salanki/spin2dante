@@ -78,6 +78,21 @@ class ArtifactAnalyzerTest(unittest.TestCase):
         self.assertTrue(result["quality_pass"])
         self.assertEqual(result["event_frames_by_kind"], {"duplicate": 1})
 
+    def test_repeated_silent_frame_is_a_duplicate_not_a_zero_gap(self):
+        reference = signal()
+        correction_frame = 128
+        reference[correction_frame - 1] = (0, 0)
+        capture = (
+            reference[:correction_frame]
+            + [(0, 0)]
+            + reference[correction_frame:]
+        )
+
+        result = self.analyze(reference, capture)
+
+        self.assertTrue(result["quality_pass"])
+        self.assertEqual(result["event_frames_by_kind"], {"duplicate": 1})
+
     def test_oversized_duplicate_is_rejected(self):
         reference = signal()
         correction_frame = 128
@@ -125,6 +140,25 @@ class ArtifactAnalyzerTest(unittest.TestCase):
 
         self.assertFalse(result["quality_pass"])
         self.assertEqual(result["event_frames_by_kind"], {"drop": 100})
+        self.assertEqual(result["event_count"], 1)
+
+    def test_insertion_larger_than_local_lookahead_reacquires_once(self):
+        reference = signal(512)
+        correction_frame = 128
+        inserted = [
+            (300_000_000 + frame, -400_000_000 - frame)
+            for frame in range(100)
+        ]
+        capture = (
+            reference[:correction_frame]
+            + inserted
+            + reference[correction_frame:]
+        )
+
+        result = self.analyze(reference, capture, lookahead_frames=64)
+
+        self.assertFalse(result["quality_pass"])
+        self.assertEqual(result["event_frames_by_kind"], {"insertion": 100})
         self.assertEqual(result["event_count"], 1)
 
     def test_sample_mutation_is_rejected(self):

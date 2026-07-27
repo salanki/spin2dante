@@ -16,7 +16,7 @@ Bridge [Sendspin](https://www.sendspin-audio.com/) audio streams to [DANTE](http
 
 The primary use case is connecting DANTE-compatible audio devices (amplifiers, receivers, DSPs) to music streamers — in particular [Music Assistant](https://www.music-assistant.io/). Each bridge instance appears as a Sendspin player in Music Assistant and as a DANTE transmitter on the network. You subscribe your DANTE receivers to the bridge's output channels using Dante Controller or `netaudio`. This gives you synchronized multi-room group playback across DANTE zones, controlled from Music Assistant.
 
-spin2dante is a pure protocol bridge. Audio flows directly from the Sendspin WebSocket stream into DANTE network packets — it does **not** pass through the host's audio subsystem (no ALSA, PulseAudio, or PipeWire involved). The implementation is lossless and bit-perfect for PCM audio, running entirely in userspace.
+spin2dante is a pure protocol bridge. Audio flows directly from the Sendspin WebSocket stream into DANTE network packets — it does **not** pass through the host's audio subsystem (no ALSA, PulseAudio, or PipeWire involved). PCM samples are transported losslessly in userspace except for logged single-frame repeats or drops when measured Sendspin/PTP clock drift requires correction.
 
 ```
 Music Assistant
@@ -36,7 +36,7 @@ DANTE Receivers (amplifiers, receivers, etc.)
 - **Unlimited zones** — run one bridge per zone, each appears as a separate DANTE transmitter and Music Assistant player. Tested with up to 16 simultaneous stereo pairs.
 - **Sub-millisecond cross-bridge sync** — bridges sharing the same PTP clock and Sendspin server synchronize to within 1-16 samples (0.02-0.33ms). Group playback across zones stays in tight sync without inter-bridge communication.
 - **Cross-ecosystem sync with Sonos** — validated with Music Assistant grouped playback spanning Sonos and DANTE players simultaneously; the two ecosystems stay in perfect audible sync.
-- **Bit-perfect PCM transport** — the E2E test harness captures the DANTE output from each bridge, aligns it against a deterministic reference signal, and verifies sample-level exact match. The test infrastructure captures their DANTE output via `inferno2pipe`, and performs overlap comparison against a known reference. Both audio integrity (bit-perfect match) and cross-bridge sync are validated.
+- **Measured PCM integrity** — the E2E harness captures DANTE output, aligns it against a deterministic reference, verifies sample-level exact runs and match ratio, and attributes any declared single-frame timing corrections separately from corruption.
 
 ## Deployment Options
 
@@ -135,9 +135,9 @@ Each bridge instance is configured via CLI arguments and environment variables.
 | `--url` / `-u` | (required) | Sendspin server WebSocket URL |
 | `--name` / `-n` | "Sendspin Bridge" | DANTE device name visible on the network |
 | `--buffer-ms` | 5 | Playout buffer / latency in milliseconds. Larger values improve jitter tolerance, but they also add the same amount of audio delay. |
-| `--drift-threshold-ms` | 5 | Drift threshold in milliseconds before an in-place anchor correction is applied. |
+| `--drift-threshold-ms` | 5 | Drift threshold in milliseconds before gradual single-frame correction begins. |
 | `--drift-check-interval-ms` | 1000 | How often to sample drift between the Sendspin and PTP timelines. |
-| `--max-correction-samples-per-tick` | 48 | Maximum anchor shift applied in one drift-correction tick. |
+| `--max-correction-samples-per-tick` | 48 | Maximum single-frame repeat/drop budget per drift-check interval. `0` disables drift correction. |
 | `--client-id` | Derived from name | Stable Sendspin/Music Assistant player identity |
 | `--dante-latency` | 10 | DANTE transmit latency in milliseconds, advertised to receivers as their minimum playout buffer. Allowed values: `0.5`, `1`, `2`, `5`, `10`, `20`. |
 | `--volume-control` | none | Volume control mode: `none` (default, passthrough) or `bridge` (software gain applied inside the bridge). See [Volume Control](#volume-control) below. |
@@ -160,22 +160,25 @@ remote, `5ms` remains the recommended default.
 
 Once a bridge is running, it periodically samples the DANTE read position and
 the Sendspin server clock. If drift grows beyond `--drift-threshold-ms`, the
-bridge shifts its scheduler anchor in place instead of rebuffering, capped by
-`--max-correction-samples-per-tick` each check. This keeps long-running bridges
-aligned without introducing a prebuffer-sized audible gap.
+bridge uses the sendspin-rs correction planner to schedule isolated complete
+stereo-frame repeats (slow source clock) or drops (fast source clock). The
+`--max-correction-samples-per-tick` setting caps their average cadence. Every
+applied correction advances the scheduler anchor by the same one-frame amount,
+so queued chunks stay contiguous instead of exposing unwritten ring space.
 
 By default, drift is checked every second and corrected once it exceeds `5ms`.
-Large anomalies still fall back to a full rebuffer for safety.
+The default budget permits at most 48 one-frame events per interval; each event
+is 20.8 microseconds at 48kHz and is spread over the interval by the planner.
+Set the budget to `0` to disable drift correction. Ring-scale anomalies and
+planner reanchor requests still fall back to a full rebuffer for safety.
 
-Keep `--max-correction-samples-per-tick` conservative. The default `48`
-samples is about `1ms` at 48kHz and is intended to stay comfortably below the
-"backward target" rebuffer path. Values above roughly `100` samples increase
-the chance that a single correction could force a full rebuffer when chunks are
-small.
+The uncorrected frames remain bit-exact. During sustained clock drift, the
+output is therefore bit-perfect modulo the logged single-frame repeats/drops
+needed to keep the Sendspin and PTP timelines aligned.
 
 ### Volume Control
 
-By default, spin2dante is a transparent bit-perfect passthrough — it advertises no volume or mute capability, and Music Assistant hides the volume slider.
+By default, spin2dante applies no gain processing — it advertises no volume or mute capability, and Music Assistant hides the volume slider. PCM remains bit-exact except for any logged clock-drift timing corrections described above.
 
 When `--volume-control=bridge` is enabled:
 - The bridge advertises volume and mute support to Music Assistant

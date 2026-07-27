@@ -9,7 +9,7 @@ from audio_artifact_analyzer import analyze_artifacts
 
 
 REFERENCE_PATH = "/shared/reference_capture.raw"
-CAPTURE_PATH = "/shared/capture.raw"
+CAPTURE_PATH = "/shared/drift_capture.raw"
 BRIDGE_LOG_PATH = "/shared/bridge.log"
 RESULT_PATH = "/shared/drift_analysis.json"
 
@@ -70,6 +70,17 @@ def main():
         event for event in result.get("events", []) if event["kind"] == "zero_gap"
     ]
     duplicate_frames = result.get("event_frames_by_kind", {}).get("duplicate", 0)
+    disrupted_frames = sum(
+        event["frames"]
+        for event in result.get("events", [])
+        if event["kind"] in {"desync", "mutation"}
+    )
+    unobserved_inserts = max(total_inserted - duplicate_frames, 0)
+    unexpected_duplicates = max(duplicate_frames - total_inserted, 0)
+    correction_reconciliation_pass = (
+        unexpected_duplicates == 0
+        and unobserved_inserts <= disrupted_frames
+    )
     oversized_discrete_events = [
         event
         for event in result.get("events", [])
@@ -84,10 +95,19 @@ def main():
     correction_quality_pass = (
         duplicate_frames > 0
         and total_dropped == 0
+        and correction_reconciliation_pass
         and not oversized_discrete_events
         and not batched_zero_gaps
     )
     result["correction_quality_pass"] = correction_quality_pass
+    result["correction_reconciliation"] = {
+        "logged_inserted_frames": total_inserted,
+        "observed_duplicate_frames": duplicate_frames,
+        "unobserved_inserted_frames": unobserved_inserts,
+        "unexpected_duplicate_frames": unexpected_duplicates,
+        "disrupted_frames_allowance": disrupted_frames,
+        "pass": correction_reconciliation_pass,
+    }
     with open(RESULT_PATH, "w", encoding="utf-8") as result_file:
         json.dump(result, result_file, indent=2)
         result_file.write("\n")
@@ -97,6 +117,13 @@ def main():
     print(f"Dropped frames: {total_dropped}")
     print(f"Analyzer events: {result.get('event_count', 0)}")
     print(f"Duplicate frames: {duplicate_frames}")
+    print(
+        "Correction reconciliation: "
+        f"logged={total_inserted} observed={duplicate_frames} "
+        f"unobserved={unobserved_inserts} unexpected={unexpected_duplicates} "
+        f"disrupted_allowance={disrupted_frames} "
+        f"{'PASS' if correction_reconciliation_pass else 'FAIL'}"
+    )
     print(f"Zero-gap events: {len(zero_gap_events)}")
     print(f"Zero-gap frames: {zero_gap_frames}")
     print(f"Batched zero gaps (>=12 frames): {len(batched_zero_gaps)}")
@@ -117,8 +144,9 @@ def main():
 
     if not correction_quality_pass:
         fail(
-            "correction produced a 12-frame zero gap, a multi-frame discrete "
-            "timing event, a wrong-direction drop, or no repeated frame was observed"
+            "correction reconciliation failed, or correction produced a 12-frame "
+            "zero gap, multi-frame discrete timing event, wrong-direction drop, "
+            "or no repeated frame was observed"
         )
 
     print("PASS: real bridge used isolated repeated frames without batched zero gaps")

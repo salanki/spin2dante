@@ -649,6 +649,10 @@ impl SendspinBridge {
             }
             Message::StreamEnd(_) => {
                 self.queue_player_state();
+                info!(
+                    "drift correction totals: drift_inserted_frames={} drift_dropped_frames={}",
+                    self.drift_inserted_frames, self.drift_dropped_frames
+                );
                 info!("stream ended, entering idle (device stays on network)");
                 self.enter_idle();
             }
@@ -1198,6 +1202,9 @@ impl SendspinBridge {
                 );
                 let mut chunk = self.pop_pending_front().unwrap();
                 self.write_trimmed_samples(&mut chunk.channel_samples, trim, remaining, read_pos);
+                self.correction_state.last_frame = Some(std::array::from_fn(|ch| {
+                    chunk.channel_samples[ch][chunk.frames - 1]
+                }));
                 if wrapsub(chunk_end, self.write_pos) > 0 {
                     self.write_pos = chunk_end;
                 }
@@ -1286,6 +1293,8 @@ impl SendspinBridge {
     /// Fallback: write pending chunks sequentially (clock sync not ready or read_pos=0).
     fn drain_sequential(&mut self) {
         let read_pos = self.get_read_pos();
+        // No scheduler anchor means no correction schedule can be active, so
+        // sequential writes intentionally bypass CorrectionState.
         while let Some(mut chunk) = self.pop_pending_front() {
             self.write_samples_at(&mut chunk.channel_samples, chunk.frames, self.write_pos);
             self.write_pos = self.write_pos.wrapping_add(chunk.frames);
@@ -1624,5 +1633,44 @@ mod tests {
         assert_eq!(bridge.drift_inserted_frames, 2);
         assert_eq!(bridge.anchor_ring_pos, Some(anchor_pos + 2));
         assert_eq!(bridge.write_pos, anchor_pos + 2 * chunk_frames + 2);
+    }
+
+    #[test]
+    fn trimmed_chunk_refreshes_the_previous_output_frame() {
+        let mut bridge = SendspinBridge::new(
+            "ws://unused".to_string(),
+            "test".to_string(),
+            5,
+            2_000,
+            1_000_000,
+            5,
+            1_000,
+            48,
+            "test-client".to_string(),
+            VolumeControlMode::None,
+            None,
+            false,
+        );
+        let anchor_us = 1_000_000;
+        let anchor_pos = 10_000;
+        let frames = 480;
+        bridge.anchor_server_us = Some(anchor_us);
+        bridge.anchor_ring_pos = Some(anchor_pos);
+        bridge.anchor_set_at = Some(Instant::now());
+        bridge.write_pos = anchor_pos + 10;
+        bridge.scheduler_settled = true;
+        bridge.state = BridgeState::Running;
+        bridge.correction_state.last_frame = Some([-1, -2]);
+        bridge.pending_chunks.push_back(PendingChunk {
+            timestamp_us: anchor_us,
+            frames,
+            channel_samples: vec![vec![1; frames], vec![2; frames]],
+        });
+        bridge.pending_frames = frames;
+
+        bridge.drain_pending(anchor_pos + 10);
+
+        assert!(bridge.pending_chunks.is_empty());
+        assert_eq!(bridge.correction_state.last_frame, Some([1, 2]));
     }
 }

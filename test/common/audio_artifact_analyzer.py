@@ -41,13 +41,13 @@ def classify_insertion(capture, capture_start, count, frame_bytes):
     start_byte = capture_start * frame_bytes
     end_byte = start_byte + count * frame_bytes
     inserted = capture[start_byte:end_byte]
-    if not any(inserted):
-        return "zero_gap"
     if capture_start:
         previous_start = start_byte - frame_bytes
         previous_frame = capture[previous_start:start_byte]
         if inserted == previous_frame * count:
             return "duplicate"
+    if not any(inserted):
+        return "zero_gap"
     return "insertion"
 
 
@@ -118,11 +118,52 @@ def find_distant_resync(
     resync_frames,
     probe_frames,
 ):
+    proof_frames = max(resync_frames, 64)
+    proof_bytes = proof_frames * frame_bytes
+    reference_byte = reference_pos * frame_bytes
+    capture_byte = capture_pos * frame_bytes
+    reference_window = reference[reference_byte:reference_byte + proof_bytes]
+    capture_window = capture[capture_byte:capture_byte + proof_bytes]
+
+    candidates = []
+    if len(capture_window) == proof_bytes:
+        search_end = min(
+            len(reference),
+            reference_byte + (probe_frames + proof_frames) * frame_bytes,
+        )
+        match = reference.find(
+            capture_window,
+            reference_byte + frame_bytes,
+            search_end,
+        )
+        while match != -1 and match % frame_bytes:
+            match = reference.find(capture_window, match + 1, search_end)
+        if match != -1:
+            candidates.append(((match - reference_byte) // frame_bytes, 0))
+
+    if len(reference_window) == proof_bytes:
+        search_end = min(
+            len(capture),
+            capture_byte + (probe_frames + proof_frames) * frame_bytes,
+        )
+        match = capture.find(
+            reference_window,
+            capture_byte + frame_bytes,
+            search_end,
+        )
+        while match != -1 and match % frame_bytes:
+            match = capture.find(reference_window, match + 1, search_end)
+        if match != -1:
+            candidates.append((0, (match - capture_byte) // frame_bytes))
+
+    if candidates:
+        return min(candidates, key=lambda candidate: max(candidate))
+
     capture_skip, reference_skip = find_alignment(
         reference=reference[reference_pos * frame_bytes:],
         capture=capture[capture_pos * frame_bytes:],
         frame_bytes=frame_bytes,
-        window_frames=max(resync_frames, 8),
+        window_frames=proof_frames,
         probe_frames=probe_frames,
     )
     if capture_skip is None or (capture_skip == 0 and reference_skip == 0):

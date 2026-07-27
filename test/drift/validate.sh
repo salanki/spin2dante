@@ -41,4 +41,20 @@ echo "Starting deterministic audio window..."
 echo "Capturing for 35s (drift checks begin 10s after scheduler anchor)..."
 sleep 35
 
+echo "Stopping deterministic audio window..."
+: > /shared/stop_audio
+waited=0
+while ! grep -q "drift correction totals:" /shared/bridge.log 2>/dev/null; do
+    if [ "$waited" -ge 10 ]; then
+        echo "FAIL: bridge did not log terminal correction totals"
+        exit 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+done
+
+# inferno2pipe continues writing until Compose tears the harness down. Analyze a
+# stable snapshot so a growing file cannot extend or destabilize the test.
+cp /shared/capture.raw /shared/drift_capture.raw
+
 python3 /validate.py

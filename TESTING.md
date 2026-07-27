@@ -138,6 +138,11 @@ longest contiguous exact run. Its gate passes when that longest run meets
 reported, but no longer erases evidence of the valid audio before or after it;
 a badly degraded capture cannot pass on one clean window alone.
 
+The single-stream and multi-stream E2E validators also run the artifact
+analyzer as a diagnostic and preserve its JSON output. The comparator remains
+the primary gate; analyzer output attributes any mismatch to classified
+single-frame timing corrections or to unsafe/unclassified transport artifacts.
+
 ## Deterministic Drift Correction (`make test-drift`)
 
 This test exercises the production bridge and DANTE transmit/receive path,

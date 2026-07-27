@@ -27,6 +27,10 @@ START_SIGNAL_PATH = os.environ.get(
     "START_SIGNAL_PATH",
     "/shared/start_audio",
 )
+STOP_SIGNAL_PATH = os.environ.get(
+    "STOP_SIGNAL_PATH",
+    "/shared/stop_audio",
+)
 
 
 class SkewClock:
@@ -93,7 +97,7 @@ def audio_message(timestamp_us, pcm):
     return struct.pack(">Bq", 4, timestamp_us) + pcm
 
 
-async def handle_client(websocket, pcm):
+async def handle_client(websocket, pcm, stream_done):
     print("[server] client connected", flush=True)
     hello = json.loads(await websocket.recv())
     if hello.get("type") != "client/hello":
@@ -166,6 +170,12 @@ async def handle_client(websocket, pcm):
         real_start = asyncio.get_running_loop().time()
         frames_sent = 0
         while frames_sent < total_frames:
+            if os.path.exists(STOP_SIGNAL_PATH):
+                print(
+                    f"[server] stop signal received after {frames_sent} frames",
+                    flush=True,
+                )
+                break
             end_frame = min(frames_sent + CHUNK_FRAMES, total_frames)
             start_byte = frames_sent * FRAME_BYTES
             end_byte = end_frame * FRAME_BYTES
@@ -180,6 +190,7 @@ async def handle_client(websocket, pcm):
 
         print(f"[server] sent {frames_sent} frames", flush=True)
         await send(text_message("stream/end"))
+        stream_done.set()
         await asyncio.sleep(5)
     finally:
         receiver.cancel()
@@ -188,6 +199,7 @@ async def handle_client(websocket, pcm):
 
 async def main():
     pcm = generate_signal(DURATION_SECONDS * SAMPLE_RATE)
+    stream_done = asyncio.Event()
     print(
         f"[server] generated {DURATION_SECONDS}s deterministic reference",
         flush=True,
@@ -198,11 +210,11 @@ async def main():
         flush=True,
     )
     async with websockets.serve(
-        lambda websocket: handle_client(websocket, pcm),
+        lambda websocket: handle_client(websocket, pcm, stream_done),
         "0.0.0.0",
         PORT,
     ):
-        await asyncio.Future()
+        await stream_done.wait()
 
 
 if __name__ == "__main__":
