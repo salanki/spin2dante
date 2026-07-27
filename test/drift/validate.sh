@@ -36,6 +36,8 @@ fi
 netaudio subscription add --tx "02@${bridge_name}" --rx "02@i2pipe"
 echo "Subscribed i2pipe to ${bridge_name}"
 
+echo "Starting deterministic audio window..."
+: > /shared/start_audio
 echo "Capturing for 35s (drift checks begin 10s after scheduler anchor)..."
 sleep 35
 

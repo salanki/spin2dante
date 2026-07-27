@@ -4,52 +4,17 @@ import json
 import sys
 
 
+def find_window_in_reference(reference: bytes, window: bytes, frame_bytes: int):
+    reference_byte = reference.find(window)
+    while reference_byte != -1 and reference_byte % frame_bytes:
+        reference_byte = reference.find(window, reference_byte + 1)
+    return None if reference_byte == -1 else reference_byte // frame_bytes
+
+
 def is_nonzero_frame(capture: bytes, frame_start: int, frame_bytes: int) -> bool:
     start_byte = frame_start * frame_bytes
     frame = capture[start_byte:start_byte + frame_bytes]
     return len(frame) == frame_bytes and any(frame)
-
-
-def try_match_window(reference: bytes, capture: bytes, frame_bytes: int, capture_start: int, window_frames: int):
-    start_byte = capture_start * frame_bytes
-    end_byte = start_byte + window_frames * frame_bytes
-    window = capture[start_byte:end_byte]
-    if len(window) < window_frames * frame_bytes:
-        return None
-
-    ref_byte = reference.find(window)
-    while ref_byte != -1 and (ref_byte % frame_bytes) != 0:
-        ref_byte = reference.find(window, ref_byte + 1)
-    if ref_byte != -1:
-        return capture_start, ref_byte // frame_bytes
-
-    return None
-
-
-def iter_candidate_starts(first_nonzero: int, max_start: int):
-    yielded = set()
-
-    # Search densely around the first audible region to keep the common case fast.
-    local_end = min(max_start, first_nonzero + 4096)
-    for step in (16, 1):
-        for capture_start in range(first_nonzero, local_end + 1, step):
-            if capture_start not in yielded:
-                yielded.add(capture_start)
-                yield capture_start
-
-    # If startup garbage exists before valid aligned audio, probe deeper into the capture
-    # at wider intervals so we can still find a later exact window without scanning every frame.
-    for step, limit in (
-        (256, min(max_start, first_nonzero + 65536)),
-        (1024, max_start),
-    ):
-        start = local_end + 1
-        if start > limit:
-            continue
-        for capture_start in range(start, limit + 1, step):
-            if capture_start not in yielded:
-                yielded.add(capture_start)
-                yield capture_start
 
 
 def find_alignment(reference: bytes, capture: bytes, frame_bytes: int, window_frames: int, probe_frames: int):
@@ -67,19 +32,43 @@ def find_alignment(reference: bytes, capture: bytes, frame_bytes: int, window_fr
     if first_nonzero is None:
         return None, None
 
-    # Index one frame out of every 64 in the reference. Scanning capture frames
+    window_bytes = window_frames * frame_bytes
+
+    # Preserve the exact earliest alignment in the common case. bytes.find()
+    # performs this one whole-window lookup in optimized native code.
+    first_byte = first_nonzero * frame_bytes
+    first_window = capture[first_byte:first_byte + window_bytes]
+    reference_start = find_window_in_reference(reference, first_window, frame_bytes)
+    if reference_start is not None:
+        return first_nonzero, reference_start
+
+    # For very short candidate ranges, the sparse grid below might never cross
+    # the reference grid. A bounded dense fallback keeps those captures exact.
+    if max_start - first_nonzero < window_frames:
+        for capture_start in range(first_nonzero + 1, max_start + 1):
+            start_byte = capture_start * frame_bytes
+            window = capture[start_byte:start_byte + window_bytes]
+            reference_start = find_window_in_reference(
+                reference,
+                window,
+                frame_bytes,
+            )
+            if reference_start is not None:
+                return capture_start, reference_start
+        return None, None
+
+    # Index one frame out of every alignment-window length in the reference. Scanning capture frames
     # against this sparse index is O(reference + capture), while repeatedly
     # calling bytes.find() for every candidate becomes prohibitively expensive
     # on minute-long captures. A true alignment necessarily crosses a reference
-    # frame on the 64-frame grid; verify the full window before accepting it.
+    # grid frame; verify the full window before accepting it.
     reference_index = {}
     reference_last_start = reference_frames - window_frames
-    for reference_start in range(0, reference_last_start + 1, 64):
+    for reference_start in range(0, reference_last_start + 1, window_frames):
         start_byte = reference_start * frame_bytes
         key = reference[start_byte:start_byte + frame_bytes]
         reference_index.setdefault(key, []).append(reference_start)
 
-    window_bytes = window_frames * frame_bytes
     for capture_start in range(first_nonzero, max_start + 1):
         start_byte = capture_start * frame_bytes
         key = capture[start_byte:start_byte + frame_bytes]
@@ -89,6 +78,18 @@ def find_alignment(reference: bytes, capture: bytes, frame_bytes: int, window_fr
                 capture[start_byte:start_byte + window_bytes]
                 == reference[reference_byte:reference_byte + window_bytes]
             ):
+                # The grid may find an interior point of a longer exact run.
+                # Walk back to report its actual first aligned frame.
+                while capture_start > first_nonzero and reference_start > 0:
+                    previous_capture = (capture_start - 1) * frame_bytes
+                    previous_reference = (reference_start - 1) * frame_bytes
+                    if (
+                        capture[previous_capture:previous_capture + frame_bytes]
+                        != reference[previous_reference:previous_reference + frame_bytes]
+                    ):
+                        break
+                    capture_start -= 1
+                    reference_start -= 1
                 return capture_start, reference_start
 
     return None, None
@@ -101,6 +102,7 @@ def analyze(
     channels: int,
     min_run_seconds: float,
     probe_seconds: float,
+    min_match_ratio: float = 0.99,
 ):
     frame_bytes = channels * 4
     if len(reference) < frame_bytes or len(capture) < frame_bytes:
@@ -142,27 +144,33 @@ def analyze(
     ref_overlap = reference[reference_first * frame_bytes:(reference_first * frame_bytes) + overlap_bytes]
     cap_overlap = capture[capture_first * frame_bytes:(capture_first * frame_bytes) + overlap_bytes]
     exact_overlap = ref_overlap == cap_overlap
-    matched_frames = 0
-    run_count = 0
-    current_run_frames = 0
-    current_run_start = 0
-    longest_run_frames = 0
-    longest_run_start = None
+    if exact_overlap:
+        matched_frames = overlap_frames
+        run_count = 1
+        longest_run_frames = overlap_frames
+        longest_run_start = 0
+    else:
+        matched_frames = 0
+        run_count = 0
+        current_run_frames = 0
+        current_run_start = 0
+        longest_run_frames = 0
+        longest_run_start = None
 
-    for frame_index in range(overlap_frames):
-        byte_start = frame_index * frame_bytes
-        byte_end = byte_start + frame_bytes
-        if ref_overlap[byte_start:byte_end] == cap_overlap[byte_start:byte_end]:
-            matched_frames += 1
-            if current_run_frames == 0:
-                current_run_start = frame_index
-                run_count += 1
-            current_run_frames += 1
-            if current_run_frames > longest_run_frames:
-                longest_run_frames = current_run_frames
-                longest_run_start = current_run_start
-        else:
-            current_run_frames = 0
+        for frame_index in range(overlap_frames):
+            byte_start = frame_index * frame_bytes
+            byte_end = byte_start + frame_bytes
+            if ref_overlap[byte_start:byte_end] == cap_overlap[byte_start:byte_end]:
+                matched_frames += 1
+                if current_run_frames == 0:
+                    current_run_start = frame_index
+                    run_count += 1
+                current_run_frames += 1
+                if current_run_frames > longest_run_frames:
+                    longest_run_frames = current_run_frames
+                    longest_run_start = current_run_start
+            else:
+                current_run_frames = 0
 
     longest_run_end = (
         longest_run_start + longest_run_frames
@@ -170,6 +178,7 @@ def analyze(
         else None
     )
 
+    match_ratio = (matched_frames / overlap_frames) if overlap_frames else 0.0
     result = {
         "alignment_found": True,
         "offset_frames": offset_frames,
@@ -180,7 +189,8 @@ def analyze(
         "reference_frames": reference_frames,
         "overlap_frames": overlap_frames,
         "matched_frames": matched_frames,
-        "match_ratio": (matched_frames / overlap_frames) if overlap_frames else 0.0,
+        "match_ratio": match_ratio,
+        "min_match_ratio": min_match_ratio,
         "run_count": run_count,
         "longest_run_frames": longest_run_frames,
         "longest_run_seconds": longest_run_frames / sample_rate,
@@ -197,6 +207,11 @@ def analyze(
         result["reason"] = (
             f"no bit-perfect run of at least {min_run_frames} frames"
         )
+    elif match_ratio < min_match_ratio:
+        result["pass"] = False
+        result["reason"] = (
+            f"match ratio {match_ratio:.6f} is below {min_match_ratio:.6f}"
+        )
     else:
         result["pass"] = True
         result["reason"] = "bit-perfect run found"
@@ -212,6 +227,7 @@ def main() -> int:
     parser.add_argument("--sample-rate", type=int, default=48000)
     parser.add_argument("--channels", type=int, default=2)
     parser.add_argument("--min-run-seconds", type=float, default=5.0)
+    parser.add_argument("--min-match-ratio", type=float, default=0.99)
     parser.add_argument("--probe-seconds", type=float, default=30.0)
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
@@ -228,6 +244,7 @@ def main() -> int:
         args.channels,
         args.min_run_seconds,
         args.probe_seconds,
+        args.min_match_ratio,
     )
     result["label"] = args.label
 

@@ -116,6 +116,17 @@ class ArtifactAnalyzerTest(unittest.TestCase):
         self.assertTrue(result["quality_pass"])
         self.assertEqual(result["event_frames_by_kind"], {"drop": 1})
 
+    def test_drop_larger_than_local_lookahead_reacquires_once(self):
+        reference = signal(512)
+        correction_frame = 128
+        capture = reference[:correction_frame] + reference[correction_frame + 100:]
+
+        result = self.analyze(reference, capture, lookahead_frames=64)
+
+        self.assertFalse(result["quality_pass"])
+        self.assertEqual(result["event_frames_by_kind"], {"drop": 100})
+        self.assertEqual(result["event_count"], 1)
+
     def test_sample_mutation_is_rejected(self):
         reference = signal()
         capture = list(reference)
@@ -125,6 +136,17 @@ class ArtifactAnalyzerTest(unittest.TestCase):
 
         self.assertFalse(result["quality_pass"])
         self.assertEqual(result["event_frames_by_kind"], {"mutation": 1})
+
+    def test_non_frame_aligned_input_is_rejected_before_analysis(self):
+        encoded = encode(signal())
+
+        with self.assertRaisesRegex(ValueError, "whole number"):
+            analyze_artifacts(
+                encoded + b"\0",
+                encoded,
+                sample_rate=48000,
+                channels=2,
+            )
 
 
 if __name__ == "__main__":

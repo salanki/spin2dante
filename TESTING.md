@@ -99,12 +99,15 @@ sample. It classifies:
 - `insertion`: other extra capture frames
 - `drop`: reference frames absent from the capture
 - `mutation`: samples that differ without a nearby timing re-alignment
+- `desync`: a larger mixed disturbance followed by successful re-acquisition
 
 The analyzer searches up to 64 frames for a re-alignment and requires eight
 following frames to match, avoiding false classification from a single
-coincidental sample. Its JSON result includes event locations and durations,
-frame totals by kind, the largest correction, and the largest boundary
-discontinuity normalized to signed-i32 full scale.
+coincidental sample. If that local search fails, it performs one sparse,
+long-range re-acquisition instead of scanning a permanently shifted tail one
+frame at a time. Its JSON result includes event locations and durations, frame
+totals by kind, the largest correction, and the largest boundary discontinuity
+normalized to signed-i32 full scale.
 
 The default quality gate permits a one-frame duplicate or drop, representing
 the smallest possible discrete correction. It rejects zero-fill, arbitrary
@@ -130,8 +133,10 @@ suffix is outside the analyzed interval.
 
 The bit-perfect comparator reports both the overall frame match ratio and the
 longest contiguous exact run. Its gate passes when that longest run meets
-`--min-run-seconds`; a short capture-path mutation is still reported, but no
-longer erases evidence of the valid audio before or after it.
+`--min-run-seconds` and the overall match ratio meets
+`--min-match-ratio` (default `0.99`). A short capture-path mutation is still
+reported, but no longer erases evidence of the valid audio before or after it;
+a badly degraded capture cannot pass on one clean window alone.
 
 ## Deterministic Drift Correction (`make test-drift`)
 
@@ -144,8 +149,9 @@ rather than calling the correction helper in isolation:
   reference.
 - The real bridge is clocked by the test PTPv2 follower and sends through
   Inferno/DANTE to `inferno2pipe`.
-- After discovery and subscription, the validator captures 35 seconds, parses
-  the bridge's correction log, and runs the artifact analyzer.
+- After discovery and subscription, the validator signals the source to start
+  a deterministic 35-second capture window, parses the bridge's cumulative
+  correction metrics, and runs the artifact analyzer.
 
 The bridge uses sendspin-rs `CorrectionPlanner` for its deadband, hysteresis,
 reanchor decision, and correction cadence. It applies that plan to complete
@@ -159,6 +165,12 @@ Drift measurements use a three-sample median before reaching the planner. This
 rejects a one-tick PTP/read-position outlier without hiding sustained drift.
 Planner cadence changes in the same direction preserve the correction
 counter's progress.
+
+The five-second `[sync]` log reports cumulative frame counts:
+`drift_corrections` is the total number of corrected frames,
+`drift_inserted_frames` counts repeated frames, and
+`drift_dropped_frames` counts removed frames. These are process-lifetime
+counters, not correction-check counts.
 
 The deterministic test settings are:
 
@@ -184,12 +196,10 @@ Detailed results are written to `/shared/drift_analysis.json` in the Compose
 `shared` volume. Preserve a failed run for inspection by avoiding
 `make clean`; `make test-drift` removes containers but not the volume.
 
-The validated local run on 2026-07-27 applied 462 inserts and no drops during
-the capture. The analyzer found 459 isolated one-frame duplicates and no
-batched zero gap; two isolated zero frames and larger mutation regions
-coincided with 22 Inferno `tx lag` reports, so the correction gate passed while
-the intentionally stricter whole-capture gate continued to report the
-host-transport artifacts.
+A passing run observes isolated one-frame duplicates for the deliberately slow
+clock, no wrong-direction drops, and no batched zero gap. Exact event counts
+depend on startup timing and host scheduling; inspect
+`/shared/drift_analysis.json` for the measurements from the current run.
 
 The netaudio-based validators use `python:3.13-slim`. Netaudio publishes a
 compatible manylinux wheel, but no musllinux wheel for Python 3.13; Alpine

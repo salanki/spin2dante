@@ -4,8 +4,8 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock* ./
 COPY src/ src/
 ENV RUSTFLAGS="-C target-feature=-crt-static"
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/build/target \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
     mkdir -p /out && \
     cargo build --release 2>&1 && \
     cp target/release/spin2dante /out/

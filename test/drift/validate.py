@@ -27,15 +27,17 @@ def main():
     with open(BRIDGE_LOG_PATH, encoding="utf-8") as bridge_log_file:
         bridge_log = bridge_log_file.read()
 
-    applied_corrections = [
+    correction_totals = [
         (int(inserted), int(dropped))
         for inserted, dropped in re.findall(
-            r"drift correction applied: inserted=(\d+) dropped=(\d+)",
+            r"drift_inserted_frames=(\d+) drift_dropped_frames=(\d+)",
             bridge_log,
         )
     ]
-    total_inserted = sum(inserted for inserted, _ in applied_corrections)
-    total_dropped = sum(dropped for _, dropped in applied_corrections)
+    if not correction_totals:
+        fail("bridge log did not contain cumulative drift-correction metrics")
+    total_inserted = max(inserted for inserted, _ in correction_totals)
+    total_dropped = max(dropped for _, dropped in correction_totals)
     if total_inserted == 0:
         fail("slow Sendspin clock did not cause any inserted-frame corrections")
     if total_dropped:
@@ -58,10 +60,10 @@ def main():
         resync_frames=8,
         allowed_event_frames=1,
     )
-    result["logged_corrections"] = [
-        {"inserted_frames": inserted, "dropped_frames": dropped}
-        for inserted, dropped in applied_corrections
-    ]
+    result["logged_correction_totals"] = {
+        "inserted_frames": total_inserted,
+        "dropped_frames": total_dropped,
+    }
 
     zero_gap_frames = result.get("event_frames_by_kind", {}).get("zero_gap", 0)
     zero_gap_events = [
@@ -90,7 +92,7 @@ def main():
         json.dump(result, result_file, indent=2)
         result_file.write("\n")
 
-    print(f"Correction batches: {len(applied_corrections)}")
+    print(f"Correction metric samples: {len(correction_totals)}")
     print(f"Inserted frames: {total_inserted}")
     print(f"Dropped frames: {total_dropped}")
     print(f"Analyzer events: {result.get('event_count', 0)}")

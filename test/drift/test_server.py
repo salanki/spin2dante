@@ -23,6 +23,10 @@ DRIFT_PPM = float(os.environ.get("DRIFT_PPM", "-250"))
 DURATION_SECONDS = int(os.environ.get("AUDIO_DURATION_SECONDS", "90"))
 LEAD_US = int(os.environ.get("AUDIO_LEAD_US", "500000"))
 TIME_SYNC_SAMPLES = int(os.environ.get("TIME_SYNC_SAMPLES", "5"))
+START_SIGNAL_PATH = os.environ.get(
+    "START_SIGNAL_PATH",
+    "/shared/start_audio",
+)
 
 
 class SkewClock:
@@ -54,21 +58,29 @@ def signed_24(state):
 def generate_signal(total_frames):
     """Return wire-format s24 PCM and write its capture-domain i32 reference."""
     pcm = bytearray(total_frames * FRAME_BYTES)
+    reference_pcm = bytearray(total_frames * CHANNELS * 4)
     capture_frame = struct.Struct("<ii")
     left_state = 0x13579BDF
     right_state = 0x2468ACE1
 
-    with open("/shared/reference_capture.raw", "wb") as reference:
-        for frame in range(total_frames):
-            left_state = xorshift32(left_state)
-            right_state = xorshift32(right_state)
-            left = signed_24(left_state)
-            right = signed_24(right_state)
+    for frame in range(total_frames):
+        left_state = xorshift32(left_state)
+        right_state = xorshift32(right_state)
+        left = signed_24(left_state)
+        right = signed_24(right_state)
 
-            offset = frame * FRAME_BYTES
-            pcm[offset:offset + 3] = left.to_bytes(3, "little", signed=True)
-            pcm[offset + 3:offset + 6] = right.to_bytes(3, "little", signed=True)
-            reference.write(capture_frame.pack(left << 8, right << 8))
+        offset = frame * FRAME_BYTES
+        pcm[offset:offset + 3] = left.to_bytes(3, "little", signed=True)
+        pcm[offset + 3:offset + 6] = right.to_bytes(3, "little", signed=True)
+        capture_frame.pack_into(
+            reference_pcm,
+            frame * capture_frame.size,
+            left << 8,
+            right << 8,
+        )
+
+    with open("/shared/reference_capture.raw", "wb") as reference:
+        reference.write(reference_pcm)
 
     return bytes(pcm)
 
@@ -135,6 +147,9 @@ async def handle_client(websocket, pcm):
             f"rate={DRIFT_PPM:+.1f}ppm",
             flush=True,
         )
+        print(f"[server] waiting for capture signal {START_SIGNAL_PATH}", flush=True)
+        while not os.path.exists(START_SIGNAL_PATH):
+            await asyncio.sleep(0.1)
 
         total_frames = len(pcm) // FRAME_BYTES
 

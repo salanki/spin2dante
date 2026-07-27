@@ -70,8 +70,9 @@ def find_resync(
     resync_frames,
     frame_bytes,
 ):
-    candidates = []
+    direction_priority = {"drop": 0, "insertion": 1, "mutation": 2}
     for skipped in range(1, lookahead + 1):
+        candidates = []
         if frames_match(
             reference,
             reference_pos,
@@ -90,10 +91,43 @@ def find_resync(
             frame_bytes,
         ):
             candidates.append((skipped, "drop"))
+        if frames_match(
+            reference,
+            reference_pos + skipped,
+            capture,
+            capture_pos + skipped,
+            resync_frames,
+            frame_bytes,
+        ):
+            candidates.append((skipped, "mutation"))
 
-    if not candidates:
+        if candidates:
+            return min(
+                candidates,
+                key=lambda candidate: direction_priority[candidate[1]],
+            )
+    return None
+
+
+def find_distant_resync(
+    reference,
+    capture,
+    reference_pos,
+    capture_pos,
+    frame_bytes,
+    resync_frames,
+    probe_frames,
+):
+    capture_skip, reference_skip = find_alignment(
+        reference=reference[reference_pos * frame_bytes:],
+        capture=capture[capture_pos * frame_bytes:],
+        frame_bytes=frame_bytes,
+        window_frames=max(resync_frames, 8),
+        probe_frames=probe_frames,
+    )
+    if capture_skip is None or (capture_skip == 0 and reference_skip == 0):
         return None
-    return min(candidates, key=lambda candidate: (candidate[0], candidate[1]))
+    return reference_skip, capture_skip
 
 
 def coalesce_mutations(events):
@@ -129,6 +163,11 @@ def analyze_artifacts(
     allowed_event_frames: int = 1,
 ):
     frame_bytes = channels * 4
+    if len(reference_bytes) % frame_bytes or len(capture_bytes) % frame_bytes:
+        raise ValueError(
+            f"audio length is not a whole number of {frame_bytes}-byte frames"
+        )
+
     capture_start, reference_start = find_alignment(
         reference=reference_bytes,
         capture=capture_bytes,
@@ -144,10 +183,6 @@ def analyze_artifacts(
             "events": [],
         }
 
-    if len(reference_bytes) % frame_bytes or len(capture_bytes) % frame_bytes:
-        raise ValueError(
-            f"audio length is not a whole number of {frame_bytes}-byte frames"
-        )
     reference_frames = len(reference_bytes) // frame_bytes
     capture_frames = len(capture_bytes) // frame_bytes
     reference_pos = reference_start
@@ -175,10 +210,38 @@ def analyze_artifacts(
             frame_bytes,
         )
         if resync is None:
-            event_frames = 1
-            kind = "mutation"
-            next_reference_pos = reference_pos + 1
-            next_capture_pos = capture_pos + 1
+            distant = find_distant_resync(
+                reference_bytes,
+                capture_bytes,
+                reference_pos,
+                capture_pos,
+                frame_bytes,
+                resync_frames,
+                int(sample_rate * probe_seconds),
+            )
+            if distant is None:
+                event_frames = 1
+                kind = "mutation"
+                next_reference_pos = reference_pos + 1
+                next_capture_pos = capture_pos + 1
+            else:
+                reference_skip, capture_skip = distant
+                next_reference_pos = reference_pos + reference_skip
+                next_capture_pos = capture_pos + capture_skip
+                if reference_skip > 0 and capture_skip == 0:
+                    event_frames = reference_skip
+                    kind = "drop"
+                elif capture_skip > 0 and reference_skip == 0:
+                    event_frames = capture_skip
+                    kind = classify_insertion(
+                        capture_bytes,
+                        capture_pos,
+                        capture_skip,
+                        frame_bytes,
+                    )
+                else:
+                    event_frames = max(reference_skip, capture_skip)
+                    kind = "desync"
         else:
             event_frames, direction = resync
             if direction == "insertion":
@@ -191,9 +254,13 @@ def analyze_artifacts(
                 next_reference_pos = reference_pos
                 next_capture_pos = capture_pos + event_frames
             else:
-                kind = "drop"
+                kind = direction
                 next_reference_pos = reference_pos + event_frames
-                next_capture_pos = capture_pos
+                next_capture_pos = (
+                    capture_pos + event_frames
+                    if direction == "mutation"
+                    else capture_pos
+                )
 
         peak = max(
             boundary_discontinuity(
@@ -257,7 +324,7 @@ def analyze_artifacts(
         "reason": (
             "no disallowed artifacts found"
             if not disallowed_event
-            else "capture contains an unsafe insertion, mutation, or oversized correction"
+            else "capture contains an unsafe timing artifact or oversized correction"
         ),
         "events": events,
     }

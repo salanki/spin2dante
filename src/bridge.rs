@@ -238,7 +238,11 @@ pub struct SendspinBridge {
     trimmed_frames: u64,
     queued_high_water: usize,
     scheduler_settled: bool,
+    // Cumulative frame-level corrections since process start. These counters
+    // are intentionally not reset with the per-stream scheduler.
     drift_corrections: u64,
+    drift_inserted_frames: u64,
+    drift_dropped_frames: u64,
     rebuffers: u64,
     drift_checks_skipped: u64,
     // Volume control
@@ -339,6 +343,8 @@ impl SendspinBridge {
             queued_high_water: 0,
             scheduler_settled: false,
             drift_corrections: 0,
+            drift_inserted_frames: 0,
+            drift_dropped_frames: 0,
             rebuffers: 0,
             drift_checks_skipped: 0,
             gain_control,
@@ -780,6 +786,19 @@ impl SendspinBridge {
         let elapsed_us = server_now_us - anchor_us;
         let expected_read_pos = expected_read_pos(anchor_pos, self.prebuffer_target, elapsed_us);
         let raw_drift_samples = wrapsub(actual_read_pos, expected_read_pos);
+
+        // A ring-scale excursion means scheduler state is unsafe. Do not wait
+        // for the median filter to fill before taking the rebuffer safety path.
+        if raw_drift_samples.abs() > (self.ring_buffer_size / 4) as isize {
+            warn!(
+                "drift anomaly: raw={} samples actual_read_pos={} expected_read_pos={}, rebuffering",
+                raw_drift_samples, actual_read_pos, expected_read_pos
+            );
+            self.count_rebuffer_if_running_anchored();
+            self.clear_and_rebuffer();
+            return;
+        }
+
         self.drift_history.push_back(raw_drift_samples);
         if self.drift_history.len() > 3 {
             self.drift_history.pop_front();
@@ -1133,7 +1152,10 @@ impl SendspinBridge {
         // No need to check ClockSync availability — transient loss shouldn't stall audio.
 
         let anchor_us = self.anchor_server_us.unwrap();
-        let anchor_pos = self.anchor_ring_pos.unwrap();
+        // Corrections change the anchor while this loop is draining. Keep this
+        // local copy current so every subsequent queued chunk is targeted after
+        // the inserted/dropped frame instead of overwriting it.
+        let mut anchor_pos = self.anchor_ring_pos.unwrap();
 
         while let Some(chunk) = self.pending_chunks.front() {
             // Target = anchor position + delta from anchor timestamp.
@@ -1239,18 +1261,14 @@ impl SendspinBridge {
 
             let net_correction = inserted as isize - dropped as isize;
             if net_correction != 0 {
-                self.anchor_ring_pos = Some(
-                    self.anchor_ring_pos
-                        .unwrap()
-                        .wrapping_add_signed(net_correction),
-                );
+                anchor_pos = anchor_pos.wrapping_add_signed(net_correction);
+                self.anchor_ring_pos = Some(anchor_pos);
                 self.drift_corrections += net_correction.unsigned_abs() as u64;
-                info!(
+                self.drift_inserted_frames += inserted as u64;
+                self.drift_dropped_frames += dropped as u64;
+                debug!(
                     "drift correction applied: inserted={} dropped={} anchor_ring_pos={} total={}",
-                    inserted,
-                    dropped,
-                    self.anchor_ring_pos.unwrap(),
-                    self.drift_corrections,
+                    inserted, dropped, anchor_pos, self.drift_corrections,
                 );
             }
 
@@ -1370,7 +1388,7 @@ impl SendspinBridge {
                     "sequential"
                 };
                 info!(
-                    "[sync] mode={} pending={} stale_drops={} trims={}/{} high_water={} drift_corrections={} rebuffers={} drift_checks_skipped={}",
+                    "[sync] mode={} pending={} stale_drops={} trims={}/{} high_water={} drift_corrections={} drift_inserted_frames={} drift_dropped_frames={} rebuffers={} drift_checks_skipped={}",
                     mode,
                     self.pending_chunks.len(),
                     self.stale_drops,
@@ -1378,6 +1396,8 @@ impl SendspinBridge {
                     self.trimmed_frames,
                     self.queued_high_water,
                     self.drift_corrections,
+                    self.drift_inserted_frames,
+                    self.drift_dropped_frames,
                     self.rebuffers,
                     self.drift_checks_skipped,
                 );
@@ -1520,5 +1540,89 @@ mod tests {
         assert_eq!(state.apply(&mut second), (1, 0));
         assert_eq!(second[0], vec![3, 4, 4, 5]);
         assert_eq!(second[1], vec![30, 40, 40, 50]);
+    }
+
+    #[test]
+    fn correction_direction_reversal_resets_the_new_direction_counter() {
+        let mut state = CorrectionState::default();
+        state.set_schedule(CorrectionSchedule {
+            insert_every_n_frames: 5,
+            drop_every_n_frames: 0,
+            reanchor: false,
+        });
+        let mut first = vec![vec![1, 2], vec![10, 20]];
+        assert_eq!(state.apply(&mut first), (0, 0));
+
+        state.set_schedule(CorrectionSchedule {
+            insert_every_n_frames: 0,
+            drop_every_n_frames: 4,
+            reanchor: false,
+        });
+
+        assert_eq!(state.insert_counter, 0);
+        assert_eq!(state.drop_counter, 4);
+    }
+
+    #[test]
+    fn first_insert_without_a_previous_frame_is_skipped() {
+        let mut state = CorrectionState::default();
+        state.set_schedule(CorrectionSchedule {
+            insert_every_n_frames: 1,
+            drop_every_n_frames: 0,
+            reanchor: false,
+        });
+        let mut channels = vec![vec![10], vec![100]];
+
+        assert_eq!(state.apply(&mut channels), (0, 0));
+        assert_eq!(channels, vec![vec![10], vec![100]]);
+        assert_eq!(state.last_frame, Some([10, 100]));
+    }
+
+    #[test]
+    fn multi_chunk_drain_keeps_corrected_targets_contiguous() {
+        let mut bridge = SendspinBridge::new(
+            "ws://unused".to_string(),
+            "test".to_string(),
+            5,
+            2_000,
+            1_000_000,
+            5,
+            1_000,
+            48,
+            "test-client".to_string(),
+            VolumeControlMode::None,
+            None,
+            false,
+        );
+        let anchor_us = 1_000_000;
+        let anchor_pos = 10_000;
+        let chunk_frames = 480;
+        bridge.anchor_server_us = Some(anchor_us);
+        bridge.anchor_ring_pos = Some(anchor_pos);
+        bridge.anchor_set_at = Some(Instant::now());
+        bridge.write_pos = anchor_pos;
+        bridge.scheduler_settled = true;
+        bridge.state = BridgeState::Running;
+        bridge.correction_state.last_frame = Some([0, 0]);
+        bridge.correction_state.set_schedule(CorrectionSchedule {
+            insert_every_n_frames: chunk_frames as u32,
+            drop_every_n_frames: 0,
+            reanchor: false,
+        });
+        for chunk_index in 0..2 {
+            bridge.pending_chunks.push_back(PendingChunk {
+                timestamp_us: anchor_us + chunk_index * 10_000,
+                frames: chunk_frames,
+                channel_samples: vec![vec![1; chunk_frames], vec![2; chunk_frames]],
+            });
+            bridge.pending_frames += chunk_frames;
+        }
+
+        bridge.drain_pending(anchor_pos - 100);
+
+        assert!(bridge.pending_chunks.is_empty());
+        assert_eq!(bridge.drift_inserted_frames, 2);
+        assert_eq!(bridge.anchor_ring_pos, Some(anchor_pos + 2));
+        assert_eq!(bridge.write_pos, anchor_pos + 2 * chunk_frames + 2);
     }
 }
