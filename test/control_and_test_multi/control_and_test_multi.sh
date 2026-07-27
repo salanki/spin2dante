@@ -44,7 +44,7 @@ echo "=== Creating audio subscriptions (${STREAM_COUNT} pairs) ==="
 for i in $(seq -w 1 $STREAM_COUNT); do
     (
         # Zero-pad to 2 digits for matching device names (SS01, SS02, ...)
-        padded=$(printf "%02d" $((10#$i)))
+        padded=$(printf "%02d" "${i#0}")
         bridge_name=$(echo "$devices" | grep "SS${padded} " | awk '{print $1}' | head -1)
         rx_name="rx${padded}"
 
@@ -77,7 +77,7 @@ rm -f "$COMPARE_JSON" "$ARTIFACT_JSON"
 
 for i in $(seq 1 $STREAM_COUNT); do
     total=$((total + 1))
-    padded=$(printf "%02d" $i)
+    padded=$(printf "%02d" "${i#0}")
     file="/shared/capture_${padded}.raw"
 
     if [ ! -f "$file" ]; then
@@ -138,7 +138,7 @@ echo "Reading sync_keys from bridges (written at anchor time)..."
 
 sync_keys=""
 for i in $(seq -w 1 $STREAM_COUNT); do
-    padded=$(printf "%02d" $((10#$i)))
+    padded=$(printf "%02d" "${i#0}")
     keyfile="/shared/sync_key_SS${padded}.txt"
     if [ -f "$keyfile" ]; then
         key=$(cat "$keyfile")
