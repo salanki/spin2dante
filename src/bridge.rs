@@ -10,6 +10,7 @@ use inferno_aoip::device_server::{
     DeviceServer, OwnedBuffer, RBInput, ReadPositionSnapshot, Sample, Settings,
 };
 use log::{debug, error, info, warn};
+use sendspin::audio::sync_correction::{CorrectionPlanner, CorrectionSchedule};
 use sendspin::protocol::client::{AudioChunk, Connection, WsSender};
 use sendspin::protocol::messages::{
     AudioFormatSpec, ClientState, ClientSyncState, Message, PlayerCommandType, PlayerState,
@@ -32,6 +33,7 @@ pub const MIN_RING_BUFFER_SIZE: usize = 16384; // ~341ms at 48kHz, power of 2
 pub const SAMPLE_RATE: u32 = 48000;
 const METRICS_INTERVAL_SECS: u64 = 5;
 const HOLE_FIX_WAIT: usize = 4800; // ~100ms at 48kHz
+
 // Absolute backstop on the pending-queue chunk count, independent of duration.
 // The real bound is duration/frames-based (see `max_pending_frames`, derived from
 // server_buffer_ms); this only guards against a pathological flood of tiny chunks.
@@ -55,8 +57,9 @@ fn expected_read_pos(anchor_ring_pos: usize, prebuffer_target: usize, elapsed_us
         .wrapping_add_signed(micros_to_samples(elapsed_us))
 }
 
-fn clamp_signed_magnitude(value: isize, max_magnitude: usize) -> isize {
-    value.clamp(-(max_magnitude as isize), max_magnitude as isize)
+fn median_drift_sample(mut samples: [isize; 3]) -> isize {
+    samples.sort_unstable();
+    samples[1]
 }
 
 // ─── Bridge state machine ───────────────────────────────────────────
@@ -88,6 +91,95 @@ struct PendingChunk {
     channel_samples: Vec<Vec<Sample>>,
 }
 
+#[derive(Default)]
+struct CorrectionState {
+    schedule: CorrectionSchedule,
+    insert_counter: u32,
+    drop_counter: u32,
+    last_frame: Option<[Sample; CHANNELS]>,
+}
+
+impl CorrectionState {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn set_schedule(&mut self, schedule: CorrectionSchedule) {
+        if schedule == self.schedule {
+            return;
+        }
+        let continuing_insert =
+            self.schedule.insert_every_n_frames > 0 && schedule.insert_every_n_frames > 0;
+        let continuing_drop =
+            self.schedule.drop_every_n_frames > 0 && schedule.drop_every_n_frames > 0;
+        self.schedule = schedule;
+        if continuing_insert {
+            self.insert_counter = self
+                .insert_counter
+                .min(schedule.insert_every_n_frames)
+                .max(1);
+        } else {
+            self.insert_counter = schedule.insert_every_n_frames;
+        }
+        if continuing_drop {
+            self.drop_counter = self.drop_counter.min(schedule.drop_every_n_frames).max(1);
+        } else {
+            self.drop_counter = schedule.drop_every_n_frames;
+        }
+    }
+
+    fn apply(&mut self, channel_samples: &mut [Vec<Sample>]) -> (usize, usize) {
+        if channel_samples.len() != CHANNELS || channel_samples[0].is_empty() {
+            return (0, 0);
+        }
+        let frames = channel_samples[0].len();
+        if !self.schedule.is_correcting() || self.schedule.reanchor {
+            self.last_frame = Some(std::array::from_fn(|ch| channel_samples[ch][frames - 1]));
+            return (0, 0);
+        }
+
+        let mut corrected: [Vec<Sample>; CHANNELS] =
+            std::array::from_fn(|_| Vec::with_capacity(frames + 1));
+        let mut inserted = 0;
+        let mut dropped = 0;
+
+        for frame_index in 0..frames {
+            if self.schedule.drop_every_n_frames > 0 {
+                self.drop_counter = self.drop_counter.saturating_sub(1);
+                if self.drop_counter == 0 {
+                    self.drop_counter = self.schedule.drop_every_n_frames;
+                    dropped += 1;
+                    continue;
+                }
+            }
+
+            if self.schedule.insert_every_n_frames > 0 {
+                self.insert_counter = self.insert_counter.saturating_sub(1);
+                if self.insert_counter == 0 {
+                    self.insert_counter = self.schedule.insert_every_n_frames;
+                    if let Some(last_frame) = self.last_frame {
+                        for ch in 0..CHANNELS {
+                            corrected[ch].push(last_frame[ch]);
+                        }
+                        inserted += 1;
+                    }
+                }
+            }
+
+            let frame = std::array::from_fn(|ch| channel_samples[ch][frame_index]);
+            for ch in 0..CHANNELS {
+                corrected[ch].push(frame[ch]);
+            }
+            self.last_frame = Some(frame);
+        }
+
+        for (destination, source) in channel_samples.iter_mut().zip(corrected) {
+            *destination = source;
+        }
+        (inserted, dropped)
+    }
+}
+
 // ─── Bridge ─────────────────────────────────────────────────────────
 
 pub struct SendspinBridge {
@@ -111,6 +203,9 @@ pub struct SendspinBridge {
     drift_threshold_samples: usize,
     drift_check_interval: Duration,
     max_correction_samples: usize,
+    correction_planner: CorrectionPlanner,
+    correction_state: CorrectionState,
+    drift_history: VecDeque<isize>,
     state: BridgeState,
     // Device + TX state (persistent for process lifetime)
     rb_inputs: Option<Vec<RBInput<Sample, OwnedBuffer<Atomic<Sample>>>>>,
@@ -143,7 +238,11 @@ pub struct SendspinBridge {
     trimmed_frames: u64,
     queued_high_water: usize,
     scheduler_settled: bool,
+    // Cumulative frame-level corrections since process start. These counters
+    // are intentionally not reset with the per-stream scheduler.
     drift_corrections: u64,
+    drift_inserted_frames: u64,
+    drift_dropped_frames: u64,
     rebuffers: u64,
     drift_checks_skipped: u64,
     // Volume control
@@ -216,6 +315,9 @@ impl SendspinBridge {
             drift_threshold_samples: ms_to_samples(drift_threshold_ms),
             drift_check_interval: Duration::from_millis(drift_check_interval_ms),
             max_correction_samples: max_correction_samples_per_tick,
+            correction_planner: CorrectionPlanner::new(),
+            correction_state: CorrectionState::default(),
+            drift_history: VecDeque::with_capacity(3),
             state: BridgeState::Idle,
             rb_inputs: None,
             device_server: None,
@@ -241,6 +343,8 @@ impl SendspinBridge {
             queued_high_water: 0,
             scheduler_settled: false,
             drift_corrections: 0,
+            drift_inserted_frames: 0,
+            drift_dropped_frames: 0,
             rebuffers: 0,
             drift_checks_skipped: 0,
             gain_control,
@@ -279,8 +383,14 @@ impl SendspinBridge {
         config.insert("NAME".to_string(), self.device_name.clone());
         config.insert("TX_SOURCE_BIT_DEPTH".to_string(), "24".to_string());
         config.insert("SAMPLE_RATE".to_string(), SAMPLE_RATE.to_string());
-        config.insert("TX_LATENCY_NS".to_string(), self.dante_latency_ns.to_string());
-        config.insert("RX_LATENCY_NS".to_string(), self.dante_latency_ns.to_string());
+        config.insert(
+            "TX_LATENCY_NS".to_string(),
+            self.dante_latency_ns.to_string(),
+        );
+        config.insert(
+            "RX_LATENCY_NS".to_string(),
+            self.dante_latency_ns.to_string(),
+        );
         let mut settings = Settings::new(&self.device_name, &short_name, None, &config);
         settings.make_tx_channels(CHANNELS);
         settings.make_rx_channels(0);
@@ -349,11 +459,9 @@ impl SendspinBridge {
             // two depths we offer. If the server negotiates 16-bit, the same byte
             // count is ~1.5x longer in time — i.e. always >= server_buffer_ms of
             // headroom, never less. u64 math avoids overflow at large values.
-            let buffer_capacity = (SAMPLE_RATE as u64
-                * CHANNELS as u64
-                * 3
-                * self.server_buffer_ms as u64
-                / 1000) as u32;
+            let buffer_capacity =
+                (SAMPLE_RATE as u64 * CHANNELS as u64 * 3 * self.server_buffer_ms as u64 / 1000)
+                    as u32;
             info!(
                 "advertising Sendspin buffer_capacity = {} bytes (~{} ms @24-bit)",
                 buffer_capacity, self.server_buffer_ms
@@ -541,6 +649,10 @@ impl SendspinBridge {
             }
             Message::StreamEnd(_) => {
                 self.queue_player_state();
+                info!(
+                    "drift correction totals: drift_inserted_frames={} drift_dropped_frames={}",
+                    self.drift_inserted_frames, self.drift_dropped_frames
+                );
                 info!("stream ended, entering idle (device stays on network)");
                 self.enter_idle();
             }
@@ -643,6 +755,8 @@ impl SendspinBridge {
         self.trimmed_frames = 0;
         self.queued_high_water = 0;
         self.scheduler_settled = false;
+        self.correction_state.reset();
+        self.drift_history.clear();
         self.gain_ramp.reset_to_current();
     }
 
@@ -675,32 +789,107 @@ impl SendspinBridge {
 
         let elapsed_us = server_now_us - anchor_us;
         let expected_read_pos = expected_read_pos(anchor_pos, self.prebuffer_target, elapsed_us);
-        let drift_samples = wrapsub(actual_read_pos, expected_read_pos);
+        let raw_drift_samples = wrapsub(actual_read_pos, expected_read_pos);
 
-        if drift_samples.abs() > (self.ring_buffer_size / 4) as isize {
+        // A ring-scale excursion means scheduler state is unsafe. Do not wait
+        // for the median filter to fill before taking the rebuffer safety path.
+        if raw_drift_samples.abs() > (self.ring_buffer_size / 4) as isize {
             warn!(
-                "drift anomaly: drift={} samples actual_read_pos={} expected_read_pos={}, rebuffering",
-                drift_samples, actual_read_pos, expected_read_pos
+                "drift anomaly: raw={} samples actual_read_pos={} expected_read_pos={}, rebuffering",
+                raw_drift_samples, actual_read_pos, expected_read_pos
             );
             self.count_rebuffer_if_running_anchored();
             self.clear_and_rebuffer();
             return;
         }
 
-        if drift_samples.abs() as usize > self.drift_threshold_samples {
-            let correction = clamp_signed_magnitude(drift_samples, self.max_correction_samples);
-            let new_anchor_pos = anchor_pos.wrapping_add_signed(correction);
-            self.anchor_ring_pos = Some(new_anchor_pos);
-            self.drift_corrections += 1;
-            info!(
-                "drift correction: drift={} samples applied={} new_anchor_ring_pos={} total={}",
-                drift_samples, correction, new_anchor_pos, self.drift_corrections
-            );
-        } else {
+        self.drift_history.push_back(raw_drift_samples);
+        if self.drift_history.len() > 3 {
+            self.drift_history.pop_front();
+        }
+        if self.drift_history.len() < 3 {
             debug!(
-                "drift within threshold: drift={} samples threshold={} actual_read_pos={} expected_read_pos={}",
-                drift_samples, self.drift_threshold_samples, actual_read_pos, expected_read_pos
+                "collecting drift filter samples: raw_drift={} count={}/3",
+                raw_drift_samples,
+                self.drift_history.len(),
             );
+            return;
+        }
+        let drift_samples = median_drift_sample([
+            self.drift_history[0],
+            self.drift_history[1],
+            self.drift_history[2],
+        ]);
+
+        if drift_samples.abs() > (self.ring_buffer_size / 4) as isize {
+            warn!(
+                "drift anomaly: filtered={} raw={} samples actual_read_pos={} expected_read_pos={}, rebuffering",
+                drift_samples, raw_drift_samples, actual_read_pos, expected_read_pos
+            );
+            self.count_rebuffer_if_running_anchored();
+            self.clear_and_rebuffer();
+            return;
+        }
+
+        let currently_correcting = self.correction_state.schedule.is_correcting();
+        if !currently_correcting && drift_samples.abs() as usize <= self.drift_threshold_samples {
+            debug!(
+                "drift within threshold: filtered={} raw={} samples threshold={} actual_read_pos={} expected_read_pos={}",
+                drift_samples,
+                raw_drift_samples,
+                self.drift_threshold_samples,
+                actual_read_pos,
+                expected_read_pos
+            );
+            return;
+        }
+
+        // CorrectionPlanner's positive error means content is late and must be
+        // dropped. Here positive drift means the Dante read head is ahead of
+        // the server timeline, so content is early and must be repeated.
+        let planner_error_us =
+            -(drift_samples as i64).saturating_mul(1_000_000) / SAMPLE_RATE as i64;
+        let mut schedule =
+            self.correction_planner
+                .plan(planner_error_us, SAMPLE_RATE, currently_correcting);
+
+        if schedule.reanchor {
+            warn!(
+                "drift planner requested reanchor: drift={} samples error_us={}, rebuffering",
+                drift_samples, planner_error_us
+            );
+            self.count_rebuffer_if_running_anchored();
+            self.clear_and_rebuffer();
+            return;
+        }
+
+        // Preserve the CLI's maximum-correction budget as an average cadence.
+        // For example, 12 samples per 250ms permits at most 48 corrections/s,
+        // or one correction per 1000 frames at 48kHz.
+        if self.max_correction_samples > 0 {
+            let max_per_second =
+                self.max_correction_samples as f64 / self.drift_check_interval.as_secs_f64();
+            let min_interval = (SAMPLE_RATE as f64 / max_per_second).ceil() as u32;
+            if schedule.insert_every_n_frames > 0 {
+                schedule.insert_every_n_frames = schedule.insert_every_n_frames.max(min_interval);
+            }
+            if schedule.drop_every_n_frames > 0 {
+                schedule.drop_every_n_frames = schedule.drop_every_n_frames.max(min_interval);
+            }
+        } else {
+            schedule = CorrectionSchedule::default();
+        }
+
+        if schedule != self.correction_state.schedule {
+            info!(
+                "drift correction schedule: filtered={} raw={} samples error_us={} insert_every={} drop_every={}",
+                drift_samples,
+                raw_drift_samples,
+                planner_error_us,
+                schedule.insert_every_n_frames,
+                schedule.drop_every_n_frames,
+            );
+            self.correction_state.set_schedule(schedule);
         }
     }
 
@@ -967,7 +1156,10 @@ impl SendspinBridge {
         // No need to check ClockSync availability — transient loss shouldn't stall audio.
 
         let anchor_us = self.anchor_server_us.unwrap();
-        let anchor_pos = self.anchor_ring_pos.unwrap();
+        // Corrections change the anchor while this loop is draining. Keep this
+        // local copy current so every subsequent queued chunk is targeted after
+        // the inserted/dropped frame instead of overwriting it.
+        let mut anchor_pos = self.anchor_ring_pos.unwrap();
 
         while let Some(chunk) = self.pending_chunks.front() {
             // Target = anchor position + delta from anchor timestamp.
@@ -1009,6 +1201,9 @@ impl SendspinBridge {
                     trim, remaining, read_pos
                 );
                 let mut chunk = self.pop_pending_front().unwrap();
+                self.correction_state.last_frame = Some(std::array::from_fn(|ch| {
+                    chunk.channel_samples[ch][chunk.frames - 1]
+                }));
                 self.write_trimmed_samples(&mut chunk.channel_samples, trim, remaining, read_pos);
                 if wrapsub(chunk_end, self.write_pos) > 0 {
                     self.write_pos = chunk_end;
@@ -1067,11 +1262,28 @@ impl SendspinBridge {
 
             // Normal: write chunk at target
             let mut chunk = self.pop_pending_front().unwrap();
-            self.write_samples_at(&mut chunk.channel_samples, chunk.frames, target);
-            if wrapsub(chunk_end, self.write_pos) > 0 {
-                self.write_pos = chunk_end;
+            let (inserted, dropped) = self.correction_state.apply(&mut chunk.channel_samples);
+            let corrected_frames = chunk.frames + inserted - dropped;
+            self.write_samples_at(&mut chunk.channel_samples, corrected_frames, target);
+
+            let net_correction = inserted as isize - dropped as isize;
+            if net_correction != 0 {
+                anchor_pos = anchor_pos.wrapping_add_signed(net_correction);
+                self.anchor_ring_pos = Some(anchor_pos);
+                self.drift_corrections += net_correction.unsigned_abs() as u64;
+                self.drift_inserted_frames += inserted as u64;
+                self.drift_dropped_frames += dropped as u64;
+                debug!(
+                    "drift correction applied: inserted={} dropped={} anchor_ring_pos={} total={}",
+                    inserted, dropped, anchor_pos, self.drift_corrections,
+                );
             }
-            self.update_state_after_write(chunk.frames, read_pos);
+
+            let corrected_end = target.wrapping_add(corrected_frames);
+            if wrapsub(corrected_end, self.write_pos) > 0 {
+                self.write_pos = corrected_end;
+            }
+            self.update_state_after_write(corrected_frames, read_pos);
             if !self.scheduler_settled {
                 self.scheduler_settled = true;
             }
@@ -1081,6 +1293,8 @@ impl SendspinBridge {
     /// Fallback: write pending chunks sequentially (clock sync not ready or read_pos=0).
     fn drain_sequential(&mut self) {
         let read_pos = self.get_read_pos();
+        // No scheduler anchor means no correction schedule can be active, so
+        // sequential writes intentionally bypass CorrectionState.
         while let Some(mut chunk) = self.pop_pending_front() {
             self.write_samples_at(&mut chunk.channel_samples, chunk.frames, self.write_pos);
             self.write_pos = self.write_pos.wrapping_add(chunk.frames);
@@ -1183,7 +1397,7 @@ impl SendspinBridge {
                     "sequential"
                 };
                 info!(
-                    "[sync] mode={} pending={} stale_drops={} trims={}/{} high_water={} drift_corrections={} rebuffers={} drift_checks_skipped={}",
+                    "[sync] mode={} pending={} stale_drops={} trims={}/{} high_water={} drift_corrections={} drift_inserted_frames={} drift_dropped_frames={} rebuffers={} drift_checks_skipped={}",
                     mode,
                     self.pending_chunks.len(),
                     self.stale_drops,
@@ -1191,6 +1405,8 @@ impl SendspinBridge {
                     self.trimmed_frames,
                     self.queued_high_water,
                     self.drift_corrections,
+                    self.drift_inserted_frames,
+                    self.drift_dropped_frames,
                     self.rebuffers,
                     self.drift_checks_skipped,
                 );
@@ -1255,30 +1471,221 @@ mod tests {
     }
 
     #[test]
-    fn positive_drift_delays_future_chunks() {
-        let anchor_ring_pos = 1_000usize;
-        let prebuffer_target = ms_to_samples(5);
-        let expected = expected_read_pos(anchor_ring_pos, prebuffer_target, 0);
-        let actual = expected.wrapping_add(120);
-        let drift_samples = wrapsub(actual, expected);
-        let correction = clamp_signed_magnitude(drift_samples, 48);
-
-        assert_eq!(drift_samples, 120);
-        assert_eq!(correction, 48);
-        assert_eq!(anchor_ring_pos.wrapping_add_signed(correction), 1_048usize);
+    fn drift_median_rejects_one_direction_reversing_outlier() {
+        assert_eq!(median_drift_sample([66, -378, 117]), 66);
+        assert_eq!(median_drift_sample([-66, 378, -117]), -66);
     }
 
     #[test]
-    fn negative_drift_pulls_future_chunks_forward() {
-        let anchor_ring_pos = 1_000usize;
-        let prebuffer_target = ms_to_samples(5);
-        let expected = expected_read_pos(anchor_ring_pos, prebuffer_target, 0);
-        let actual = expected.wrapping_sub(120);
-        let drift_samples = wrapsub(actual, expected);
-        let correction = clamp_signed_magnitude(drift_samples, 48);
+    fn correction_state_repeats_one_complete_stereo_frame() {
+        let mut state = CorrectionState::default();
+        state.last_frame = Some([9, 90]);
+        state.set_schedule(CorrectionSchedule {
+            insert_every_n_frames: 2,
+            drop_every_n_frames: 0,
+            reanchor: false,
+        });
+        let mut channels = vec![vec![10, 11, 12], vec![100, 110, 120]];
 
-        assert_eq!(drift_samples, -120);
-        assert_eq!(correction, -48);
-        assert_eq!(anchor_ring_pos.wrapping_add_signed(correction), 952usize);
+        let (inserted, dropped) = state.apply(&mut channels);
+
+        assert_eq!((inserted, dropped), (1, 0));
+        assert_eq!(channels[0], vec![10, 10, 11, 12]);
+        assert_eq!(channels[1], vec![100, 100, 110, 120]);
+    }
+
+    #[test]
+    fn correction_state_drops_one_complete_stereo_frame() {
+        let mut state = CorrectionState::default();
+        state.set_schedule(CorrectionSchedule {
+            insert_every_n_frames: 0,
+            drop_every_n_frames: 2,
+            reanchor: false,
+        });
+        let mut channels = vec![vec![10, 11, 12], vec![100, 110, 120]];
+
+        let (inserted, dropped) = state.apply(&mut channels);
+
+        assert_eq!((inserted, dropped), (0, 1));
+        assert_eq!(channels[0], vec![10, 12]);
+        assert_eq!(channels[1], vec![100, 120]);
+    }
+
+    #[test]
+    fn correction_counter_continues_across_chunks() {
+        let mut state = CorrectionState::default();
+        state.set_schedule(CorrectionSchedule {
+            insert_every_n_frames: 3,
+            drop_every_n_frames: 0,
+            reanchor: false,
+        });
+        let mut first = vec![vec![1, 2], vec![10, 20]];
+        let mut second = vec![vec![3, 4], vec![30, 40]];
+
+        assert_eq!(state.apply(&mut first), (0, 0));
+        assert_eq!(state.apply(&mut second), (1, 0));
+        assert_eq!(second[0], vec![2, 3, 4]);
+        assert_eq!(second[1], vec![20, 30, 40]);
+    }
+
+    #[test]
+    fn same_direction_schedule_update_preserves_counter_progress() {
+        let mut state = CorrectionState::default();
+        state.set_schedule(CorrectionSchedule {
+            insert_every_n_frames: 5,
+            drop_every_n_frames: 0,
+            reanchor: false,
+        });
+        let mut first = vec![vec![1, 2], vec![10, 20]];
+        assert_eq!(state.apply(&mut first), (0, 0));
+
+        state.set_schedule(CorrectionSchedule {
+            insert_every_n_frames: 6,
+            drop_every_n_frames: 0,
+            reanchor: false,
+        });
+        let mut second = vec![vec![3, 4, 5], vec![30, 40, 50]];
+
+        assert_eq!(state.apply(&mut second), (1, 0));
+        assert_eq!(second[0], vec![3, 4, 4, 5]);
+        assert_eq!(second[1], vec![30, 40, 40, 50]);
+    }
+
+    #[test]
+    fn correction_direction_reversal_resets_the_new_direction_counter() {
+        let mut state = CorrectionState::default();
+        state.set_schedule(CorrectionSchedule {
+            insert_every_n_frames: 5,
+            drop_every_n_frames: 0,
+            reanchor: false,
+        });
+        let mut first = vec![vec![1, 2], vec![10, 20]];
+        assert_eq!(state.apply(&mut first), (0, 0));
+
+        state.set_schedule(CorrectionSchedule {
+            insert_every_n_frames: 0,
+            drop_every_n_frames: 4,
+            reanchor: false,
+        });
+
+        assert_eq!(state.insert_counter, 0);
+        assert_eq!(state.drop_counter, 4);
+    }
+
+    #[test]
+    fn first_insert_without_a_previous_frame_is_skipped() {
+        let mut state = CorrectionState::default();
+        state.set_schedule(CorrectionSchedule {
+            insert_every_n_frames: 1,
+            drop_every_n_frames: 0,
+            reanchor: false,
+        });
+        let mut channels = vec![vec![10], vec![100]];
+
+        assert_eq!(state.apply(&mut channels), (0, 0));
+        assert_eq!(channels, vec![vec![10], vec![100]]);
+        assert_eq!(state.last_frame, Some([10, 100]));
+    }
+
+    #[test]
+    fn multi_chunk_drain_keeps_corrected_targets_contiguous() {
+        let mut bridge = SendspinBridge::new(
+            "ws://unused".to_string(),
+            "test".to_string(),
+            5,
+            2_000,
+            1_000_000,
+            5,
+            1_000,
+            48,
+            "test-client".to_string(),
+            VolumeControlMode::None,
+            None,
+            false,
+        );
+        let anchor_us = 1_000_000;
+        let anchor_pos = 10_000;
+        let chunk_frames = 480;
+        bridge.anchor_server_us = Some(anchor_us);
+        bridge.anchor_ring_pos = Some(anchor_pos);
+        bridge.anchor_set_at = Some(Instant::now());
+        bridge.write_pos = anchor_pos;
+        bridge.scheduler_settled = true;
+        bridge.state = BridgeState::Running;
+        bridge.correction_state.last_frame = Some([0, 0]);
+        bridge.correction_state.set_schedule(CorrectionSchedule {
+            insert_every_n_frames: chunk_frames as u32,
+            drop_every_n_frames: 0,
+            reanchor: false,
+        });
+        for chunk_index in 0..2 {
+            bridge.pending_chunks.push_back(PendingChunk {
+                timestamp_us: anchor_us + chunk_index * 10_000,
+                frames: chunk_frames,
+                channel_samples: vec![vec![1; chunk_frames], vec![2; chunk_frames]],
+            });
+            bridge.pending_frames += chunk_frames;
+        }
+
+        bridge.drain_pending(anchor_pos - 100);
+
+        assert!(bridge.pending_chunks.is_empty());
+        assert_eq!(bridge.drift_inserted_frames, 2);
+        assert_eq!(bridge.anchor_ring_pos, Some(anchor_pos + 2));
+        assert_eq!(bridge.write_pos, anchor_pos + 2 * chunk_frames + 2);
+    }
+
+    #[test]
+    fn trimmed_chunk_refreshes_the_previous_pre_gain_frame() {
+        let mut bridge = SendspinBridge::new(
+            "ws://unused".to_string(),
+            "test".to_string(),
+            5,
+            2_000,
+            1_000_000,
+            5,
+            1_000,
+            48,
+            "test-client".to_string(),
+            VolumeControlMode::Bridge,
+            None,
+            false,
+        );
+        let gain_control = GainControl::new(50, false);
+        let gain = gain_control.gain();
+        bridge.gain_ramp = BridgeGainRamp::with_gain(gain);
+        bridge.gain_control = Some(gain_control);
+        let anchor_us = 1_000_000;
+        let anchor_pos = 10_000;
+        let frames = 480;
+        bridge.anchor_server_us = Some(anchor_us);
+        bridge.anchor_ring_pos = Some(anchor_pos);
+        bridge.anchor_set_at = Some(Instant::now());
+        bridge.write_pos = anchor_pos + 10;
+        bridge.scheduler_settled = true;
+        bridge.state = BridgeState::Running;
+        bridge.correction_state.last_frame = Some([-1, -2]);
+        bridge.pending_chunks.push_back(PendingChunk {
+            timestamp_us: anchor_us,
+            frames,
+            channel_samples: vec![vec![10_000; frames], vec![20_000; frames]],
+        });
+        bridge.pending_frames = frames;
+
+        bridge.drain_pending(anchor_pos + 10);
+
+        assert!(bridge.pending_chunks.is_empty());
+        assert_eq!(bridge.correction_state.last_frame, Some([10_000, 20_000]));
+
+        bridge.correction_state.set_schedule(CorrectionSchedule {
+            insert_every_n_frames: 1,
+            drop_every_n_frames: 0,
+            reanchor: false,
+        });
+        let mut next = vec![vec![30_000], vec![40_000]];
+        assert_eq!(bridge.correction_state.apply(&mut next), (1, 0));
+        bridge.gain_ramp.apply(&mut next, 2, gain);
+        assert_eq!(next[0][0], (10_000.0 * gain as f64) as Sample);
+        assert_eq!(next[1][0], (20_000.0 * gain as f64) as Sample);
     }
 }

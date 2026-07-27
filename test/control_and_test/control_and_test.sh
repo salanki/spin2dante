@@ -67,11 +67,37 @@ if [ -f /shared/capture.raw ] && [ -f /shared/reference_capture.raw ]; then
 
     echo ""
     echo "=== Overlap comparison ==="
+    compare_status=0
     python3 /audio_compare.py \
         --reference /shared/reference_capture.raw \
         --capture /shared/capture.raw \
         --label capture.raw \
-        --min-run-seconds 5
+        --min-run-seconds 5 || compare_status=$?
+
+    echo ""
+    echo "=== Artifact attribution (diagnostic) ==="
+    artifact_status=0
+    python3 /audio_artifact_analyzer.py \
+        --reference /shared/reference_capture.raw \
+        --capture /shared/capture.raw \
+        --json > /shared/capture_artifacts.json || artifact_status=$?
+    python3 -c '
+import json
+with open("/shared/capture_artifacts.json", encoding="utf-8") as result_file:
+    result = json.load(result_file)
+print(
+    "events={} frames_by_kind={} quality_pass={}".format(
+        result.get("event_count", 0),
+        result.get("event_frames_by_kind", {}),
+        result.get("quality_pass", False),
+    )
+)
+' || echo "Artifact summary unavailable (diagnostic only)"
+    echo "Artifact report: /shared/capture_artifacts.json (diagnostic status=${artifact_status})"
+
+    if [ "$compare_status" -ne 0 ]; then
+        exit "$compare_status"
+    fi
 
 else
     echo "NOTE: capture or reference file missing"

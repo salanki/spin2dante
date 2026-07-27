@@ -2,11 +2,15 @@ INFERNO_DIR ?= ../inferno
 MUSIC_ASSISTANT_COMPOSE ?= test/music_assistant/docker-compose.yml
 MUSIC_ASSISTANT_DOCKER_CONFIG ?= /tmp/music-assistant-docker-config
 
-.PHONY: build test test-multi test-sync-verify test-resilience test-volume test-ma-interactive ma-up ma-down ma-logs clean
+.PHONY: build test-analyzer test test-multi test-sync-verify test-drift test-resilience test-volume test-ma-interactive ma-up ma-down ma-logs clean
 
 ## Build the bridge Docker image
 build:
 	docker build -t spin2dante .
+
+## Run fast offline tests for timing-correction artifact detection
+test-analyzer:
+	python3 -m unittest discover -s test/common -p 'test_*.py' -v
 
 ## Build the inferno2pipe image (required once before tests)
 inferno2pipe:
@@ -35,6 +39,14 @@ test-sync-verify: build inferno2pipe
 	docker compose -f docker-compose.sync-verify.yml up --build --abort-on-container-exit control; \
 	result=$$?; \
 	docker compose -f docker-compose.sync-verify.yml down --remove-orphans; \
+	exit $$result
+
+## Verify gradual drift correction through a real DANTE capture
+test-drift: build inferno2pipe
+	cd test && docker compose -f docker-compose.drift.yml down --remove-orphans 2>/dev/null; \
+	docker compose -f docker-compose.drift.yml up --build --abort-on-container-exit --exit-code-from validator validator; \
+	result=$$?; \
+	docker compose -f docker-compose.drift.yml down --remove-orphans; \
 	exit $$result
 
 ## Run the resilience test (stream stop/start, seek, server restart)
@@ -84,5 +96,6 @@ clean:
 	cd test && docker compose -f docker-compose.multi.yml down --remove-orphans --volumes 2>/dev/null || true
 	cd test && docker compose -f docker-compose.resilience.yml down --remove-orphans --volumes 2>/dev/null || true
 	cd test && docker compose -f docker-compose.sync-verify.yml down --remove-orphans --volumes 2>/dev/null || true
+	cd test && docker compose -f docker-compose.drift.yml down --remove-orphans --volumes 2>/dev/null || true
 	cd test && docker compose -f docker-compose.volume.yml down --remove-orphans --volumes 2>/dev/null || true
 	cd test && docker compose -f docker-compose.ma-interactive.yml down --remove-orphans --volumes 2>/dev/null || true

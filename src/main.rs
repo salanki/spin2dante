@@ -115,7 +115,7 @@ struct Args {
     #[arg(long, default_value_t = 1000)]
     drift_check_interval_ms: u64,
 
-    /// Maximum anchor shift to apply in one drift-correction tick.
+    /// Maximum single-frame insert/drop corrections per drift-check interval; 0 disables correction.
     #[arg(long, default_value_t = 48)]
     max_correction_samples_per_tick: usize,
 

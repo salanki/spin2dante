@@ -2,7 +2,7 @@
 
 ## Context
 
-This bridge streams audio from Sendspin sources (e.g., Music Assistant) to DANTE receivers without going through the host's audio subsystem. It's a direct protocol-to-protocol bridge: receive audio via Sendspin's WebSocket protocol, write it into inferno_aoip's transmit ring buffers, and let the DANTE TX engine send it on the network. The result is a completely userspace, bit-perfect (for PCM) audio bridge.
+This bridge streams audio from Sendspin sources (e.g., Music Assistant) to DANTE receivers without going through the host's audio subsystem. It's a direct protocol-to-protocol bridge: receive audio via Sendspin's WebSocket protocol, write it into inferno_aoip's transmit ring buffers, and let the DANTE TX engine send it on the network. PCM is bit-exact except for logged single-frame repeats or drops applied under measured Sendspin/PTP clock drift.
 
 ## Architecture
 
@@ -103,7 +103,13 @@ For chunk C:
            = target_A  ✓
 ```
 
-The sync_key metric (`ring_pos - server_us * rate / 1M`) confirms this — it differs by only 1-16 samples across bridges.
+The initial sync_key metric (`ring_pos - server_us * rate / 1M`) confirms this
+anchor — it differs by only 1-16 samples across bridges. Drift corrections
+subsequently move each bridge's anchor independently. Bridges sharing the same
+PTP and Sendspin clocks should accrue corrections at the same average rate, but
+their instantaneous schedules can differ by a few frames. That is tens of
+microseconds at 48kHz and remains within the sub-millisecond sync budget; the
+initial sync_key is no longer an exact invariant after correction begins.
 
 ### Chunk eligibility decisions
 
@@ -111,11 +117,38 @@ The sync_key metric (`ring_pos - server_us * rate / 1M`) confirms this — it di
 - `target < read_pos < target + frames` → trim stale prefix, write remainder
 - `target far ahead of write frontier` → scheduler activation (first chunk) or discontinuity (settled)
 - `target behind write_pos by more than one chunk` → rebuffer (broken scheduler state)
-- Otherwise → write at target
+- Otherwise → apply any scheduled one-frame repeat/drop, write at target, and
+  advance the anchor by the actual correction so the next target is contiguous
 
 ### Sequential fallback
 
 Before the PTP clock is available (`read_pos = 0`), the bridge writes chunks sequentially at `write_pos`. Once `read_pos` becomes valid and ClockSync converges, the anchor is established and timestamp-driven positioning activates.
+
+## Clock Drift Correction
+
+Once the anchor has settled, the bridge periodically compares the actual DANTE
+read position with the position predicted from the Sendspin server timeline.
+A three-sample median filters ordinary measurement jitter; a ring-scale raw
+excursion bypasses that filter and immediately re-buffers for safety.
+
+Ordinary error is passed to sendspin-rs `CorrectionPlanner`, which supplies the
+deadband, hysteresis, correction direction/cadence, and reanchor decision. The
+CLI correction budget is converted to a minimum frame interval and clamps the
+planner cadence. `CorrectionState` carries that schedule across pending chunks:
+
+- slow source timeline → repeat the preceding complete stereo frame;
+- fast source timeline → drop one complete stereo frame;
+- planner reanchor or ring-scale error → clear and rebuffer.
+
+Each applied correction changes `anchor_ring_pos` by the same signed one-frame
+amount during the current drain pass. This keeps later queued targets
+contiguous. Cumulative inserted and dropped frame counts are emitted in the
+five-second `[sync]` metric and are reconciled with capture analysis in the
+deterministic drift test.
+
+The resulting stream is bit-perfect modulo these declared one-frame timing
+events. At 48kHz each event is 20.8 microseconds; corrections are distributed
+over time rather than emitted as a multi-frame zero gap.
 
 ## PTP Clock Model
 
@@ -166,7 +199,8 @@ process start → Idle (device + TX alive, ring silent)
 
 1. Sendspin delivers `AudioChunk { data: Arc<[u8]> }` — raw PCM bytes over WebSocket
 2. Bridge decodes, deinterleaves (L/R), shifts to inferno format → `PendingChunk`
-3. `drain_pending()` computes target from anchor, writes via `RBInput::write_from_at()`
+3. `drain_pending()` computes target from anchor, applies any planned
+   frame-level timing correction, and writes via `RBInput::write_from_at()`
 4. FlowsTransmitter reads via `RBOutput::read_at()` at PTP-synchronized timestamps
 
 ## Sample Format Alignment
@@ -175,7 +209,7 @@ process start → Idle (device + TX alive, ring silent)
 - **Sendspin PCM 16-bit**: 2 bytes LE signed → cast to i32 → shift left 16
 - **Inferno `Sample`**: i32 with 24-bit value in upper 24 bits
 
-The bridge currently advertises and accepts PCM `16-bit` and `24-bit` Sendspin streams. Both are transported losslessly through Inferno's `Sample` representation.
+The bridge currently advertises and accepts PCM `16-bit` and `24-bit` Sendspin streams. Both decode losslessly into Inferno's `Sample` representation; logged frame repeats/drops may still occur when clock-drift correction is active.
 
 `TX_SOURCE_BIT_DEPTH` is intentionally fixed to `24`. This is not a statement that the bridge only supports 24-bit source audio; it reflects Inferno's 24-bit-oriented TX sample path and keeps TX dithering disabled for bit-perfect PCM transport.
 
@@ -201,7 +235,7 @@ Components:
 
 The gain is applied after scheduling (after the anchor/drift-correction layer decides where to place each chunk) and before the ring buffer write. Drift correction operates on timing/positions, not sample values, so gain is completely orthogonal.
 
-At 100% volume with mute off, the gain path is a true no-op: `ramp_frames_remaining == 0 && current_gain == 1.0` returns immediately without touching any samples. This preserves bit-perfect transport.
+At 100% volume with mute off, the gain path is a true no-op: `ramp_frames_remaining == 0 && current_gain == 1.0` returns immediately without touching any samples. It adds no sample modification beyond any independently logged timing corrections.
 
 The gain ramp state is reset on stream transitions (StreamStart, StreamEnd, StreamClear, reconnection) to avoid carrying stale ramp state into new audio.
 
@@ -280,6 +314,5 @@ The usrvclock protocol uses Unix datagram sockets in `$TMPDIR`. Docker container
 ## Future Work
 
 - **FLAC support**: When sendspin-rs gains FLAC decoding
-- **Drift compensation**: Sample insertion/dropping if fill deviates from target over long sessions
 - **Prometheus metrics**: Production monitoring endpoint
 - **Ring buffer sizing**: Derived per-bridge from `buffer_ms` + `server_buffer_ms` (≈ 2× their sum, rounded up to a power of 2, floored at 16384 samples / ~341ms). Could be further tuned based on production latency requirements.
