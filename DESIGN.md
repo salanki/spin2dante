@@ -196,7 +196,8 @@ decode_pcm() → PendingChunk queue → BridgeGainRamp.apply() → RBInput ring 
 ```
 
 Components:
-- **`GainControl`** (from sendspin crate): Thread-safe atomic state for volume (0–100, perceptual 1.5-power curve) and mute. Provides `gain() -> f32` (0.0–1.0 linear).
+- **`GainControl`** (from sendspin crate): Thread-safe atomic state for volume (0–100) and mute. The bridge uses it only for the raw volume/mute state (command plumbing, persistence, player-state reporting) — its `gain()` accessor (a `(volume/100)^1.5` curve) is deliberately not used.
+- **`volume_to_gain`** (in `src/gain.rs`): Maps volume/mute to the ramp's gain target with a linear-in-dB taper (`dB = 40 × (vol/100 − 1)`, 0.4 dB per 1% step, −40 dB anchor), exact unity at 100%, and a linear fade to true zero below the 10% knee. Chosen over sendspin's `^1.5` curve so loudness changes evenly across the whole 0–100 range instead of compressing into 0–50%.
 - **`BridgeGainRamp`** (in `src/gain.rs`): Per-frame gain ramping (20ms at 48kHz = 960 frames) adapted for per-channel `Vec<Sample>` (i32). Prevents clicks on volume changes. Uses f64 intermediate for sample multiplication to preserve 24-bit precision.
 
 The gain is applied after scheduling (after the anchor/drift-correction layer decides where to place each chunk) and before the ring buffer write. Drift correction operates on timing/positions, not sample values, so gain is completely orthogonal.

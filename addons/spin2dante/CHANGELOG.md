@@ -1,8 +1,21 @@
 # Changelog
 
-## Unreleased — 2026-06-23
+## Unreleased — 2026-07-27
 
 ### Changed
+- **Volume taper reworked — existing volumes/presets need converting.** Bridge-side volume (`volume_control: bridge`) now uses a linear-in-dB (audio) taper — 0.4 dB per 1% step, 100% = full level (still bit-perfect), 50% ≈ −20 dB, smooth fade to true silence below 10% — replacing the old `(volume/100)^1.5` curve that crammed the entire audible range into 0–50% and left 50–100% nearly flat. **A given volume % is now quieter than before** (e.g. 50% went from −9 dB to −20 dB). To keep the same loudness, convert any stored volume — Home Assistant automations, scenes, scripts, MA presets, and the per-bridge saved volume restored at startup — using `new = 100 − 75 × log10(100 / old)` (old ≥ 7, round to nearest):
+
+  | Old | New | Old | New |
+  |----:|----:|----:|----:|
+  | 100 | 100 | 40 | 70 |
+  | 90 | 97 | 30 | 61 |
+  | 80 | 93 | 25 | 55 |
+  | 75 | 91 | 20 | 48 |
+  | 70 | 88 | 15 | 38 |
+  | 60 | 83 | 10 | 25 |
+  | 50 | 77 | 5 | 7 |
+
+  Mute behavior, the 20 ms anti-click ramp, bit-perfect passthrough at 100% (steady state), and `volume_control: none` mode are unchanged. See the add-on documentation ("Converting volumes from older versions") for details.
 - Lowered the default `server_buffer_ms` from 2000 ms to **500 ms**. `buffer_capacity` also bounds volume/mute control latency — Music Assistant delivers control commands over the same Sendspin connection, *behind* the buffered audio, so worst-case control lag ≈ `server_buffer_ms`. Validated on a live 21-zone deployment: 2000 ms produced ~2.2 s mute/volume lag while 500 ms feels instant, with **zero** late-binary skips at either value (deepest send-ahead observed ~360 ms). 500 ms balances ~2.5× the old 200 ms skip headroom against snappy controls. Raise for more skip tolerance (slower volume); lower for the opposite. (The gain is applied bridge-side at drain, after the pending queue, so the buffer never pre-attenuates audio — the lag is purely the control message queued behind audio in MA.)
 
 > Maintainer note: set the real image sha as the version in `config.yaml` and this header on build/release.

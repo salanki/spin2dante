@@ -4,6 +4,40 @@ use crate::bridge::SAMPLE_RATE;
 
 const RAMP_DURATION_MS: u32 = 20;
 
+/// dB attenuation at the knee-anchored end of the linear-in-dB taper (see
+/// `volume_to_gain`). Not a true floor: below the knee the fade continues
+/// past this value down to exact zero.
+const TAPER_ANCHOR_DB: f32 = -40.0;
+/// Below this fraction of full volume, gain fades linearly to true zero
+/// instead of following the dB line (which never reaches silence).
+const TAPER_KNEE: f32 = 0.1;
+
+/// Map a 0-100 volume + mute state to a linear gain factor.
+///
+/// Uses a linear-in-dB (audio) taper so each volume step changes perceived
+/// loudness by a constant amount: `dB = 40 * (volume/100 - 1)`, i.e. 0.4 dB
+/// per 1% step, unity (exactly 1.0, bit-perfect) at 100%, -20 dB at 50%.
+/// Below the 10% knee the gain fades linearly to exact zero at 0%, avoiding
+/// an audible cliff between 1% and mute.
+///
+/// This intentionally replaces `GainControl::gain()`'s `(volume/100)^1.5`
+/// perceptual curve, which compressed the audible range into 0-50% and left
+/// 50-100% spanning only ~9 dB.
+pub(crate) fn volume_to_gain(volume: u8, muted: bool) -> f32 {
+    if muted {
+        return 0.0;
+    }
+    let vol = f32::from(volume.min(100)) / 100.0;
+    if vol <= 0.0 {
+        0.0
+    } else if vol < TAPER_KNEE {
+        // Linear fade from zero up to the dB line's value at the knee.
+        (vol / TAPER_KNEE) * 10f32.powf(TAPER_ANCHOR_DB / 20.0 * (1.0 - TAPER_KNEE))
+    } else {
+        10f32.powf(TAPER_ANCHOR_DB / 20.0 * (1.0 - vol))
+    }
+}
+
 /// Per-frame gain ramp for i32 samples, avoiding clicks on volume changes.
 ///
 /// Mirrors sendspin's `GainRamp` algorithm but adapted for per-channel
@@ -387,5 +421,56 @@ mod tests {
         ramp_b.apply_range(&mut buf_b, start, len, 0.3);
 
         assert_eq!(buf_a[0][start..total], buf_b[0][start..total]);
+    }
+
+    // ─── volume_to_gain taper ───────────────────────────────────────
+
+    #[test]
+    fn taper_full_volume_is_exact_unity() {
+        // Must be exactly 1.0 so BridgeGainRamp's bit-perfect fast path engages.
+        assert_eq!(volume_to_gain(100, false).to_bits(), 1.0f32.to_bits());
+    }
+
+    #[test]
+    fn taper_mute_is_exact_zero() {
+        for v in [0, 1, 10, 50, 100] {
+            assert_eq!(volume_to_gain(v, true), 0.0);
+        }
+    }
+
+    #[test]
+    fn taper_zero_volume_is_exact_zero() {
+        assert_eq!(volume_to_gain(0, false), 0.0);
+    }
+
+    #[test]
+    fn taper_follows_db_line_above_knee() {
+        // dB = 40 * (vol/100 - 1): 50% -> -20 dB, 75% -> -10 dB, 25% -> -30 dB
+        let db = |v: u8| 20.0 * volume_to_gain(v, false).log10();
+        assert!((db(50) - -20.0).abs() < 0.01, "50% = {} dB", db(50));
+        assert!((db(75) - -10.0).abs() < 0.01, "75% = {} dB", db(75));
+        assert!((db(25) - -30.0).abs() < 0.01, "25% = {} dB", db(25));
+    }
+
+    #[test]
+    fn taper_knee_is_continuous() {
+        // The fade branch at vol just below the knee must approach the dB
+        // line's value at the knee (no discontinuity at 10%).
+        let at_knee = volume_to_gain(10, false);
+        let expected = 10f32.powf(TAPER_ANCHOR_DB / 20.0 * (1.0 - TAPER_KNEE));
+        assert!((at_knee - expected).abs() < 1e-6);
+        // 9% is on the fade branch: 0.9 * knee value.
+        let below = volume_to_gain(9, false);
+        assert!((below - 0.9 * expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn taper_is_strictly_monotonic() {
+        let mut prev = volume_to_gain(0, false);
+        for v in 1..=100u8 {
+            let g = volume_to_gain(v, false);
+            assert!(g > prev, "not increasing at {v}%: {g} <= {prev}");
+            prev = g;
+        }
     }
 }

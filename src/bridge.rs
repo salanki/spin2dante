@@ -19,7 +19,7 @@ use sendspin::sync::clock::ClockSync;
 use sendspin::{GainControl, ProtocolClientBuilder};
 use tokio::sync::oneshot;
 
-use crate::gain::BridgeGainRamp;
+use crate::gain::{volume_to_gain, BridgeGainRamp};
 use crate::metrics::BufferMetrics;
 use crate::VolumeControlMode;
 
@@ -43,6 +43,14 @@ fn wrapsub(a: usize, b: usize) -> isize {
 
 fn ms_to_samples(ms: u32) -> usize {
     (SAMPLE_RATE as usize * ms as usize) / 1000
+}
+
+/// Gain target for the ramp, computed from the raw volume/mute state with
+/// spin2dante's own linear-in-dB taper rather than `GainControl::gain()`'s
+/// `(volume/100)^1.5` curve (see `gain::volume_to_gain`). `GainControl`
+/// remains the source of truth for the volume number and mute flag.
+fn gain_target(gc: &GainControl) -> f32 {
+    volume_to_gain(gc.volume(), gc.is_muted())
 }
 
 fn micros_to_samples(delta_us: i64) -> isize {
@@ -199,7 +207,7 @@ impl SendspinBridge {
                 .unwrap_or_default();
             info!("initial volume: {}%, muted: {}", vs.volume, vs.muted);
             let gc = GainControl::new(vs.volume, vs.muted);
-            let ramp = BridgeGainRamp::with_gain(gc.gain());
+            let ramp = BridgeGainRamp::with_gain(gain_target(&gc));
             (Some(gc), ramp)
         } else {
             (None, BridgeGainRamp::new())
@@ -879,7 +887,7 @@ impl SendspinBridge {
                 Some(dropped) => {
                     self.stale_drops += 1;
                     if let Some(gc) = &self.gain_control {
-                        self.gain_ramp.advance(dropped.frames, gc.gain());
+                        self.gain_ramp.advance(dropped.frames, gain_target(gc));
                     }
                 }
                 None => break,
@@ -988,7 +996,7 @@ impl SendspinBridge {
             if wrapsub(chunk_end, read_pos) <= 0 {
                 self.stale_drops += 1;
                 if let Some(gc) = &self.gain_control {
-                    self.gain_ramp.advance(chunk.frames, gc.gain());
+                    self.gain_ramp.advance(chunk.frames, gain_target(gc));
                 }
                 debug!(
                     "dropped stale chunk: ts={}, target={}, read_pos={}",
@@ -1124,7 +1132,7 @@ impl SendspinBridge {
 
     fn write_samples_at(&mut self, channel_samples: &mut [Vec<Sample>], frames: usize, pos: usize) {
         if let Some(gc) = &self.gain_control {
-            self.gain_ramp.apply(channel_samples, frames, gc.gain());
+            self.gain_ramp.apply(channel_samples, frames, gain_target(gc));
         }
         if let Some(inputs) = &mut self.rb_inputs {
             for (ch, samples) in channel_samples.iter().enumerate() {
@@ -1141,7 +1149,7 @@ impl SendspinBridge {
         pos: usize,
     ) {
         if let Some(gc) = &self.gain_control {
-            let target = gc.gain();
+            let target = gain_target(gc);
             self.gain_ramp.advance(trim, target);
             self.gain_ramp
                 .apply_range(channel_samples, trim, remaining, target);

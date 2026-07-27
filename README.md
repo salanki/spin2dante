@@ -182,9 +182,27 @@ When `--volume-control=bridge` is enabled:
 - MA shows the normal volume slider and mute toggle
 - Volume/mute commands are applied as software gain to the decoded audio stream before writing into the DANTE TX ring
 
-**100% volume is bit-perfect.** At full volume with mute off, the gain path is a true no-op — no float math, no sample modification, no rounding. The bridge preserves identical output to `--volume-control=none`.
+**100% volume is bit-perfect.** At full volume with mute off, the gain path is a true no-op — no float math, no sample modification, no rounding. The bridge preserves identical output to `--volume-control=none`. (The guarantee applies at steady state: during the 20 ms ramp after a volume/mute transition, samples are scaled; once the ramp settles at 100% the no-op path re-engages.)
 
-Volume changes use a 20ms per-frame ramp to prevent audible clicks. The perceptual curve follows sendspin's model: `gain = (volume / 100)^1.5`, so 50% volume feels like "half volume" rather than half amplitude.
+Volume changes use a 20ms per-frame ramp to prevent audible clicks.
+
+**Volume taper.** The 0–100 volume maps to gain with a linear-in-dB (audio) taper: `dB = 40 × (volume/100 − 1)`, i.e. a constant 0.4 dB per 1% step, anchored at −40 dB, with unity (0 dBFS) at 100%. So 75% ≈ −10 dB, 50% ≈ −20 dB, 25% ≈ −30 dB. Below 10% the gain fades linearly to true silence at 0% (dropping past −40 dB, ≈−56 dB at 1%), avoiding an audible cliff between 1% and mute. This gives each step of the slider a roughly equal loudness change across the whole travel — unlike a linear-amplitude mapping, where everything audible happens below 50%.
+
+**Migrating volumes from versions with the old `^1.5` curve.** Earlier versions used sendspin's `gain = (volume/100)^1.5` curve. A given volume % is now quieter (50% went from −9 dB to −20 dB). To keep the same loudness, convert stored volumes (presets, automations, scenes) with:
+
+```
+new = 100 − 75 × log10(100 / old)      (old ≥ 7; round to nearest)
+```
+
+| Old | New | Old | New |
+|----:|----:|----:|----:|
+| 100 | 100 | 40 | 70 |
+| 90 | 97 | 30 | 61 |
+| 80 | 93 | 25 | 55 |
+| 75 | 91 | 20 | 48 |
+| 70 | 88 | 15 | 38 |
+| 60 | 83 | 10 | 25 |
+| 50 | 77 | 5 | 7 |
 
 ### Environment Variables
 

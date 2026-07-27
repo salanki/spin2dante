@@ -21,8 +21,25 @@ FRAME_SIZE = BYTES_PER_SAMPLE * CHANNELS
 MARGIN_S = 2.0
 # Measurement window length (seconds)
 WINDOW_S = 3.0
-# Minimum expected RMS reduction in dB (volume 50 → gain ~0.354 → ~-9dB)
-MIN_REDUCTION_DB = 6.0
+# Allowed deviation from the taper's expected reduction (dB). RMS windowing
+# contributes ~±1 dB of slop; 3 dB still rejects both the old ^1.5 curve
+# (-9 dB at volume 50) and an over-attenuating/near-mute taper.
+TOLERANCE_DB = 3.0
+
+
+def volume_to_gain(volume):
+    """Mirror of the bridge's linear-in-dB taper (src/gain.rs volume_to_gain).
+
+    dB = 40 * (vol/100 - 1) above the 10% knee; linear fade to zero below.
+    """
+    anchor_db = -40.0
+    knee = 0.1
+    vol = min(volume, 100) / 100.0
+    if vol <= 0.0:
+        return 0.0
+    if vol < knee:
+        return (vol / knee) * 10 ** (anchor_db / 20.0 * (1.0 - knee))
+    return 10 ** (anchor_db / 20.0 * (1.0 - vol))
 
 
 def read_24bit_samples(data, start_frame, num_frames):
@@ -119,14 +136,17 @@ def main():
     reduction_db = 20 * math.log10(rms_before / rms_after) if rms_after > 0 else float('inf')
     print(f"Reduction: {reduction_db:.1f} dB")
 
-    if reduction_db < MIN_REDUCTION_DB:
-        print(f"FAIL: expected at least {MIN_REDUCTION_DB} dB reduction, got {reduction_db:.1f} dB")
-        sys.exit(1)
-
-    # Also verify the "after" signal isn't completely silent (gain should be ~0.354, not 0)
-    expected_ratio = (meta['target_volume'] / 100.0) ** 1.5  # sendspin perceptual curve
+    # Two-sided check against the taper: catches both under-attenuation
+    # (e.g. the old ^1.5 curve) and over-attenuation (broken taper near-muting).
+    expected_ratio = volume_to_gain(meta['target_volume'])
     expected_db = -20 * math.log10(expected_ratio) if expected_ratio > 0 else float('inf')
-    print(f"Expected reduction for volume={meta['target_volume']}: ~{expected_db:.1f} dB")
+    print(f"Expected reduction for volume={meta['target_volume']}: {expected_db:.1f} dB "
+          f"(tolerance ±{TOLERANCE_DB} dB)")
+
+    if abs(reduction_db - expected_db) > TOLERANCE_DB:
+        print(f"FAIL: expected {expected_db:.1f} ±{TOLERANCE_DB} dB reduction, "
+              f"got {reduction_db:.1f} dB")
+        sys.exit(1)
 
     print(f"\nPASS: volume at {meta['target_volume']}% reduced amplitude by {reduction_db:.1f} dB")
 
