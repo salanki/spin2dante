@@ -96,8 +96,15 @@ struct Args {
     /// Music Assistant) may queue audio before it throttles. A larger value lets
     /// the server run further ahead and absorb its own event-loop / writer stalls
     /// before it drops chunks ("Late binary … skipping"). It is NOT a prebuffer
-    /// or start delay — that is `--buffer-ms`. Default 2000 ms.
-    #[arg(long, default_value_t = 2000, value_parser = clap::value_parser!(u32).range(50..=20000))]
+    /// or start delay — that is `--buffer-ms`. Default 500 ms.
+    ///
+    /// Trade-off: this also bounds volume/mute control latency. Music Assistant
+    /// delivers control commands over the same connection, behind the buffered
+    /// audio, so the worst-case control lag is roughly this value. 500 ms keeps
+    /// controls feeling instant while still giving ~2.5x the old 200 ms of stall
+    /// headroom. Raise it for more skip tolerance (at the cost of slower volume
+    /// response); lower it for snappier control (at the cost of less headroom).
+    #[arg(long, default_value_t = 500, value_parser = clap::value_parser!(u32).range(50..=20000))]
     server_buffer_ms: u32,
 
     /// Trigger in-place drift correction once offset exceeds this many ms.
