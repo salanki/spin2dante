@@ -171,16 +171,43 @@ class ArtifactAnalyzerTest(unittest.TestCase):
         self.assertFalse(result["quality_pass"])
         self.assertEqual(result["event_frames_by_kind"], {"mutation": 1})
 
-    def test_non_frame_aligned_input_is_rejected_before_analysis(self):
+    def test_mutation_larger_than_local_lookahead_reacquires_once(self):
+        reference = signal(512)
+        capture = list(reference)
+        capture[128:228] = [
+            (300_000_000 + frame, -400_000_000 - frame)
+            for frame in range(100)
+        ]
+
+        result = self.analyze(reference, capture, lookahead_frames=64)
+
+        self.assertFalse(result["quality_pass"])
+        self.assertEqual(result["event_frames_by_kind"], {"desync": 100})
+        self.assertEqual(result["event_count"], 1)
+
+    def test_non_frame_aligned_reference_is_rejected_before_analysis(self):
         encoded = encode(signal())
 
-        with self.assertRaisesRegex(ValueError, "whole number"):
+        with self.assertRaisesRegex(ValueError, "reference length"):
             analyze_artifacts(
                 encoded + b"\0",
                 encoded,
                 sample_rate=48000,
                 channels=2,
             )
+
+    def test_partial_trailing_capture_frame_is_ignored(self):
+        encoded = encode(signal())
+
+        result = analyze_artifacts(
+            encoded,
+            encoded + b"\x01\x02\x03",
+            sample_rate=48000,
+            channels=2,
+        )
+
+        self.assertTrue(result["quality_pass"])
+        self.assertEqual(result["events"], [])
 
 
 if __name__ == "__main__":

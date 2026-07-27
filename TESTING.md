@@ -127,6 +127,10 @@ the former anchor-shift behavior: inserting 12 zero frames is classified as a
 0.25 ms `zero_gap` and rejected. This makes that audible-risk behavior
 measurable without listening.
 
+References must contain complete interleaved frames. A partial trailing capture
+frame is ignored because live `inferno2pipe` snapshots can occur between sample
+writes and that incomplete frame contains no analyzable audio.
+
 Like the existing bit-perfect comparator, analysis starts at the first exact
 alignment window. An artifact before that window or in an unmatched trailing
 suffix is outside the analyzed interval.
@@ -142,6 +146,8 @@ The single-stream and multi-stream E2E validators also run the artifact
 analyzer as a diagnostic and preserve its JSON output. The comparator remains
 the primary gate; analyzer output attributes any mismatch to classified
 single-frame timing corrections or to unsafe/unclassified transport artifacts.
+Analyzer or diagnostic-summary failures are reported but cannot override the
+comparator's exit status.
 
 ## Deterministic Drift Correction (`make test-drift`)
 
@@ -200,6 +206,9 @@ not masquerade as bridge correction failures.
 Detailed results are written to `/shared/drift_analysis.json` in the Compose
 `shared` volume. Preserve a failed run for inspection by avoiding
 `make clean`; `make test-drift` removes containers but not the volume.
+Compose is instructed to return the validator container's exit code explicitly,
+and the finite test source closes its listener but remains alive until teardown.
+This prevents a dependency exit from masking or interrupting validation.
 
 A passing run observes isolated one-frame duplicates for the deliberately slow
 clock, no wrong-direction drops, and no batched zero gap. Exact event counts

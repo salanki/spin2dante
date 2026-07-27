@@ -1201,10 +1201,10 @@ impl SendspinBridge {
                     trim, remaining, read_pos
                 );
                 let mut chunk = self.pop_pending_front().unwrap();
-                self.write_trimmed_samples(&mut chunk.channel_samples, trim, remaining, read_pos);
                 self.correction_state.last_frame = Some(std::array::from_fn(|ch| {
                     chunk.channel_samples[ch][chunk.frames - 1]
                 }));
+                self.write_trimmed_samples(&mut chunk.channel_samples, trim, remaining, read_pos);
                 if wrapsub(chunk_end, self.write_pos) > 0 {
                     self.write_pos = chunk_end;
                 }
@@ -1636,7 +1636,7 @@ mod tests {
     }
 
     #[test]
-    fn trimmed_chunk_refreshes_the_previous_output_frame() {
+    fn trimmed_chunk_refreshes_the_previous_pre_gain_frame() {
         let mut bridge = SendspinBridge::new(
             "ws://unused".to_string(),
             "test".to_string(),
@@ -1647,10 +1647,14 @@ mod tests {
             1_000,
             48,
             "test-client".to_string(),
-            VolumeControlMode::None,
+            VolumeControlMode::Bridge,
             None,
             false,
         );
+        let gain_control = GainControl::new(50, false);
+        let gain = gain_control.gain();
+        bridge.gain_ramp = BridgeGainRamp::with_gain(gain);
+        bridge.gain_control = Some(gain_control);
         let anchor_us = 1_000_000;
         let anchor_pos = 10_000;
         let frames = 480;
@@ -1664,13 +1668,24 @@ mod tests {
         bridge.pending_chunks.push_back(PendingChunk {
             timestamp_us: anchor_us,
             frames,
-            channel_samples: vec![vec![1; frames], vec![2; frames]],
+            channel_samples: vec![vec![10_000; frames], vec![20_000; frames]],
         });
         bridge.pending_frames = frames;
 
         bridge.drain_pending(anchor_pos + 10);
 
         assert!(bridge.pending_chunks.is_empty());
-        assert_eq!(bridge.correction_state.last_frame, Some([1, 2]));
+        assert_eq!(bridge.correction_state.last_frame, Some([10_000, 20_000]));
+
+        bridge.correction_state.set_schedule(CorrectionSchedule {
+            insert_every_n_frames: 1,
+            drop_every_n_frames: 0,
+            reanchor: false,
+        });
+        let mut next = vec![vec![30_000], vec![40_000]];
+        assert_eq!(bridge.correction_state.apply(&mut next), (1, 0));
+        bridge.gain_ramp.apply(&mut next, 2, gain);
+        assert_eq!(next[0][0], (10_000.0 * gain as f64) as Sample);
+        assert_eq!(next[1][0], (20_000.0 * gain as f64) as Sample);
     }
 }

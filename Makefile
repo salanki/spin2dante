@@ -44,7 +44,7 @@ test-sync-verify: build inferno2pipe
 ## Verify gradual drift correction through a real DANTE capture
 test-drift: build inferno2pipe
 	cd test && docker compose -f docker-compose.drift.yml down --remove-orphans 2>/dev/null; \
-	docker compose -f docker-compose.drift.yml up --build --abort-on-container-exit validator; \
+	docker compose -f docker-compose.drift.yml up --build --abort-on-container-exit --exit-code-from validator validator; \
 	result=$$?; \
 	docker compose -f docker-compose.drift.yml down --remove-orphans; \
 	exit $$result

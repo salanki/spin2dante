@@ -92,7 +92,7 @@ print(
         result.get("quality_pass", False),
     )
 )
-'
+' || echo "Artifact summary unavailable (diagnostic only)"
     echo "Artifact report: /shared/capture_artifacts.json (diagnostic status=${artifact_status})"
 
     if [ "$compare_status" -ne 0 ]; then

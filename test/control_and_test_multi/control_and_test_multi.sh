@@ -115,7 +115,7 @@ for i in $(seq 1 $STREAM_COUNT); do
         --reference /shared/reference_capture.raw \
         --capture "$file" \
         --json > /tmp/artifact_${padded}.json || artifact_status=$?
-    cat /tmp/artifact_${padded}.json >> "$ARTIFACT_JSON"
+    cat /tmp/artifact_${padded}.json >> "$ARTIFACT_JSON" 2>/dev/null || true
     python3 -c "
 import json
 with open('/tmp/artifact_${padded}.json', encoding='utf-8') as result_file:
@@ -126,7 +126,7 @@ print(
     f'frames_by_kind={result.get(\"event_frames_by_kind\", {})} '
     f'quality_pass={result.get(\"quality_pass\", False)}'
 )
-"
+" || echo "  capture_${padded}.raw artifact summary unavailable (diagnostic only)"
     echo "  artifact attribution status=${artifact_status} (diagnostic only; comparator_pass=${compare_pass})"
 done
 

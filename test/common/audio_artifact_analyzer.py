@@ -159,6 +159,27 @@ def find_distant_resync(
     if candidates:
         return min(candidates, key=lambda candidate: max(candidate))
 
+    # A long capture-path mutation often preserves timeline length: both sides
+    # become bit-exact again at the same offset. Check that common desync shape
+    # directly before rebuilding the general sparse alignment index.
+    reference_frames = len(reference) // frame_bytes
+    capture_frames = len(capture) // frame_bytes
+    max_same_offset_skip = min(
+        probe_frames,
+        reference_frames - reference_pos - proof_frames,
+        capture_frames - capture_pos - proof_frames,
+    )
+    for skipped in range(1, max_same_offset_skip + 1):
+        if frames_match(
+            reference,
+            reference_pos + skipped,
+            capture,
+            capture_pos + skipped,
+            proof_frames,
+            frame_bytes,
+        ):
+            return skipped, skipped
+
     capture_skip, reference_skip = find_alignment(
         reference=reference[reference_pos * frame_bytes:],
         capture=capture[capture_pos * frame_bytes:],
@@ -204,10 +225,13 @@ def analyze_artifacts(
     allowed_event_frames: int = 1,
 ):
     frame_bytes = channels * 4
-    if len(reference_bytes) % frame_bytes or len(capture_bytes) % frame_bytes:
+    if len(reference_bytes) % frame_bytes:
         raise ValueError(
-            f"audio length is not a whole number of {frame_bytes}-byte frames"
+            f"reference length is not a whole number of {frame_bytes}-byte frames"
         )
+    # Capture files may be snapshotted while inferno2pipe is between sample
+    # writes. A partial trailing frame has no analyzable audio information.
+    capture_bytes = capture_bytes[:len(capture_bytes) // frame_bytes * frame_bytes]
 
     capture_start, reference_start = find_alignment(
         reference=reference_bytes,

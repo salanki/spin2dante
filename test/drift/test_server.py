@@ -215,6 +215,9 @@ async def main():
         PORT,
     ):
         await stream_done.wait()
+    # Stop accepting reconnects after the finite test stream, but keep the
+    # dependency container alive until Compose tears the harness down.
+    await asyncio.Future()
 
 
 if __name__ == "__main__":
