@@ -149,6 +149,23 @@ single-frame timing corrections or to unsafe/unclassified transport artifacts.
 Analyzer or diagnostic-summary failures are reported but cannot override the
 comparator's exit status.
 
+The same target also tests `test/common/sync_log_analyzer.py`. This separate
+log analyzer consumes attributed `[sync]` records, groups only bridges with the
+same nonzero `stream_start_us`, and compares their current
+`timeline_offset_frames` values in five-second reporting buckets. Its JSON
+output includes:
+
+- the maximum pairwise skew and affected bridge IDs/names;
+- median and p95 skew in frames and milliseconds;
+- per-stream growing/stable/reconverging classification;
+- maximum queue/drop/trim/rebuffer/skipped-check counters.
+
+Run it against a saved log with:
+
+```bash
+python3 test/common/sync_log_analyzer.py spin2dante.log
+```
+
 ## Deterministic Drift Correction (`make test-drift`)
 
 This test exercises the production bridge and DANTE transmit/receive path,
@@ -177,7 +194,7 @@ rejects a one-tick PTP/read-position outlier without hiding sustained drift.
 Planner cadence changes in the same direction preserve the correction
 counter's progress.
 
-The five-second `[sync]` log reports cumulative frame counts:
+The periodic `[sync]` log reports cumulative frame counts:
 `drift_corrections` is the total number of corrected frames,
 `drift_inserted_frames` counts repeated frames, and
 `drift_dropped_frames` counts removed frames. These are process-lifetime

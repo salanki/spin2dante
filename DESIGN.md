@@ -143,8 +143,13 @@ planner cadence. `CorrectionState` carries that schedule across pending chunks:
 Each applied correction changes `anchor_ring_pos` by the same signed one-frame
 amount during the current drain pass. This keeps later queued targets
 contiguous. Cumulative inserted and dropped frame counts are emitted in the
-five-second `[sync]` metric and are reconciled with capture analysis in the
-deterministic drift test.
+periodic `[sync]` metric and are reconciled with capture analysis in the
+deterministic drift test. The same record includes bridge attribution, a local
+stream sequence, the first Sendspin timestamp, and the latest filtered/raw
+read-position error against the shared Sendspin/PTP timeline. Pairwise
+subtraction of `timeline_offset_frames` for equal `stream_start_us` values is
+the operational inter-bridge skew measurement; lifetime correction-counter
+differences are not used as a substitute.
 
 The resulting stream is bit-perfect modulo these declared one-frame timing
 events. At 48kHz each event is 20.8 microseconds; corrections are distributed

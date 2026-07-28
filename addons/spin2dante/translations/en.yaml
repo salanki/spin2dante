@@ -24,6 +24,11 @@ configuration:
     description: >-
       Maximum single-frame repeat/drop corrections per drift-check interval.
       Set to 0 to disable drift correction.
+  sync_log_interval_seconds:
+    name: Sync log interval
+    description: >-
+      Seconds between INFO-level per-bridge sync summaries. Five-second
+      diagnostics remain available when log level is set to debug.
   bridges:
     name: Bridges
     description: List of Sendspin-to-DANTE bridge definitions.

@@ -27,6 +27,7 @@ Use the companion `statime` add-on first. The intended setup is:
 - `drift_threshold_ms`: Drift threshold in milliseconds before gradual single-frame correction begins
 - `drift_check_interval_ms`: How often, in milliseconds, to sample drift between the Sendspin and PTP timelines
 - `max_correction_samples_per_tick`: Maximum single-frame repeat/drop budget per drift-check interval. Set to `0` to disable correction.
+- `sync_log_interval_seconds`: Seconds between attributed INFO-level sync summaries. Default: `120`. Five-second detail remains available at `debug`.
 - `bridges`: List of bridge definitions
 
 Each bridge entry contains:
@@ -61,6 +62,7 @@ dante_bind: auto
 drift_threshold_ms: 5
 drift_check_interval_ms: 1000
 max_correction_samples_per_tick: 48
+sync_log_interval_seconds: 120
 bridges:
   - id: kitchen
     name: Kitchen
@@ -178,6 +180,7 @@ Defaults:
 - `drift_threshold_ms: 5`
 - `drift_check_interval_ms: 1000`
 - `max_correction_samples_per_tick: 48`
+- `sync_log_interval_seconds: 120`
 
 The default budget allows at most 48 one-frame events per interval. Each event
 is 20.8 microseconds at 48kHz, and the planner spreads them over time. Set the
@@ -186,6 +189,44 @@ reanchor requests still fall back to a full rebuffer.
 
 PCM remains bit-exact except for these logged single-frame repeats/drops (and
 software gain when bridge-side volume is enabled below 100%).
+
+### Sync diagnostics
+
+Every INFO-level `[sync]` record identifies its bridge and current local
+stream session. `stream_start_us` is the first Sendspin audio timestamp seen in
+that session; records with the same nonzero value carry the same source
+timeline and can be compared.
+
+`timeline_offset_frames` is the median-filtered signed DANTE read-position
+error against the shared Sendspin/PTP prediction. Subtract the values from two
+records in the same reporting window to estimate their electronic playout
+skew. At 48 kHz, 48 frames = 1 ms. This is a direct current-timeline
+measurement; do not infer skew from the process-lifetime
+`drift_inserted_frames` and `drift_dropped_frames` counters.
+
+Example:
+
+```text
+[sync] bridge_id=livingroom bridge_name="Living Room" ... session=1 \
+stream_start_us=1842000000 drift_valid=1 timeline_offset_frames=-72 \
+timeline_offset_us=-1500 raw_offset_frames=-65 anchor_correction_frames=174 ...
+```
+
+Use the bundled analyzer on saved App/container logs:
+
+```bash
+python3 test/common/sync_log_analyzer.py spin2dante.log
+```
+
+It reports maximum, median, and p95 pairwise skew; the two bridges at the
+maximum; whether each stream's spread is growing or reconverging; and maximum
+fault counters. Records from different `stream_start_us` values are never
+compared.
+
+INFO summaries default to every two minutes to preserve useful history on
+multi-bridge installations. Correction start/stop events remain immediate at
+INFO; cadence-only adjustments and five-second sync/buffer snapshots are
+DEBUG-level. Warnings and errors are never rate-limited.
 
 ## Notes
 
