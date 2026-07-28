@@ -26,7 +26,7 @@
   | 60 | 83 | 10 | 25 |
   | 50 | 77 | 5 | 7 |
 
-  Mute behavior, the 20 ms anti-click ramp, bit-perfect passthrough at 100% (steady state), and `volume_control: none` mode are unchanged. See the add-on documentation ("Converting volumes from older versions") for details.
+  Mute behavior, the 20 ms anti-click ramp, bit-perfect passthrough at 100% (steady state), and `volume_control: none` mode are unchanged.
 
 ## sha-fc118da — 2026-07-27
 
