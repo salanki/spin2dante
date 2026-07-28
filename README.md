@@ -75,17 +75,19 @@ trunks. This validates operation with receivers behind multiple switches, but
 does not imply that arbitrary multicast, QoS, VLAN, or switch configurations
 will work without appropriate setup.
 
-The Home Assistant OS VM runs on pinned CPU cores and receives a dedicated
-DANTE NIC through PCI passthrough, reducing host-scheduler and virtualized
-network variability. These are characteristics of the validated deployment,
-not strict requirements for spin2dante.
+The Home Assistant OS VM runs on Proxmox with vCPUs pinned 1:1 to isolated host
+CPUs and scheduled with `SCHED_FIFO`. It receives a dedicated Broadcom DANTE
+NIC through PCI passthrough, reducing host-scheduler and virtualized-network
+variability. These are characteristics of the validated deployment, not strict
+requirements for spin2dante.
 
 The Wisdom amplifier supplies the hardware PTP grandmaster. The Home Assistant
-VM follows it through Statime using software clock handling rather than a
-hardware-timestamped PTP path. Every bridge in this deployment uses
-`dante_latency=10ms`, providing reasonable packet-jitter and scheduling
-headroom for the VM-based transmitter. This adds a common latency floor; it is
-not a 10ms cross-zone synchronization error.
+VM follows it through Statime. Although the NIC is passed through directly, it
+exposes no PTP hardware clock, so timestamping and transmit timing remain
+software-based. Every bridge in this deployment uses `dante_latency=10ms`,
+providing reasonable packet-jitter and scheduling headroom for the VM-based
+transmitter. This adds a common latency floor; it is not a 10ms cross-zone
+synchronization error.
 
 This deployment provides real-hardware operational validation, not a universal
 performance guarantee. Controlled tests measured the initial anchor-mapping
