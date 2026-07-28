@@ -1,5 +1,5 @@
 name: "spin2dante"
-version: "sha-9b05ab9"
+version: "sha-fc118da"
 slug: spin2dante
 description: >-
   Bit-perfect bridge of one or more Sendspin audio streams to Audinate DANTE channels.
@@ -61,7 +61,7 @@ schema:
   server_buffer_ms: int(50,20000)
   drift_threshold_ms: int(0,250)
   drift_check_interval_ms: int(100,10000)
-  max_correction_samples_per_tick: int(1,120)
+  max_correction_samples_per_tick: int(0,120)
   bridges:
     - id: match(^[a-z0-9][a-z0-9_-]*$)
       name: str

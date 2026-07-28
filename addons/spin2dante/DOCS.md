@@ -24,9 +24,9 @@ Use the companion `statime` add-on first. The intended setup is:
 - `wait_for_clock_seconds`: How long to wait for the clock socket before failing startup
 - `log_level`: Rust log level for all bridge processes
 - `dante_bind`: Interface name or IPv4 address to use for DANTE/mDNS traffic. Use `auto` to let Inferno choose the host's default local IPv4 address.
-- `drift_threshold_ms`: Drift threshold in milliseconds before the bridge applies an in-place anchor correction
+- `drift_threshold_ms`: Drift threshold in milliseconds before gradual single-frame correction begins
 - `drift_check_interval_ms`: How often, in milliseconds, to sample drift between the Sendspin and PTP timelines
-- `max_correction_samples_per_tick`: Maximum anchor shift, in samples, applied in one drift-correction tick
+- `max_correction_samples_per_tick`: Maximum single-frame repeat/drop budget per drift-check interval. Set to `0` to disable correction.
 - `bridges`: List of bridge definitions
 
 Each bridge entry contains:
@@ -169,20 +169,23 @@ it restores the last-known volume instead of defaulting to 100%.
 
 spin2dante periodically compares the DANTE read position against the Sendspin
 server clock. When the two drift apart by more than `drift_threshold_ms`, the
-bridge shifts its scheduler anchor in place instead of forcing a full rebuffer.
+bridge uses the sendspin-rs correction planner to distribute isolated complete
+stereo-frame repeats (slow source clock) or drops (fast source clock). It moves
+the scheduler anchor by each correction actually applied, keeping later queued
+chunks contiguous.
 
 Defaults:
 - `drift_threshold_ms: 5`
 - `drift_check_interval_ms: 1000`
 - `max_correction_samples_per_tick: 48`
 
-This keeps long-running bridges aligned while capping each single correction to
-about `1ms` at 48kHz. Large anomalies still fall back to a full rebuffer.
+The default budget allows at most 48 one-frame events per interval. Each event
+is 20.8 microseconds at 48kHz, and the planner spreads them over time. Set the
+budget to `0` to disable drift correction. Ring-scale anomalies and planner
+reanchor requests still fall back to a full rebuffer.
 
-Keep `max_correction_samples_per_tick` conservative. The default `48` samples
-is chosen to stay comfortably below the backward-target rebuffer path. Values
-above roughly `100` samples increase the chance that a single correction could
-force a full rebuffer when chunks are small.
+PCM remains bit-exact except for these logged single-frame repeats/drops (and
+software gain when bridge-side volume is enabled below 100%).
 
 ## Notes
 

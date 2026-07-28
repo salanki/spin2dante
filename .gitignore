@@ -1,4 +1,6 @@
 /target
+__pycache__/
+*.pyc
 Cargo.lock
 test/music_assistant/data/
 test/music_assistant/media/

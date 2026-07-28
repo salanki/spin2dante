@@ -15,13 +15,15 @@ configuration:
       auto to let Inferno choose the host's default local IPv4 address.
   drift_threshold_ms:
     name: Drift threshold
-    description: Drift in milliseconds before the bridge applies an in-place anchor correction.
+    description: Drift in milliseconds before gradual single-frame correction begins.
   drift_check_interval_ms:
     name: Drift check interval
     description: How often, in milliseconds, the bridge samples drift between the Sendspin and PTP timelines.
   max_correction_samples_per_tick:
     name: Max correction per tick
-    description: Maximum anchor shift, in samples, that can be applied in one drift-correction tick.
+    description: >-
+      Maximum single-frame repeat/drop corrections per drift-check interval.
+      Set to 0 to disable drift correction.
   bridges:
     name: Bridges
     description: List of Sendspin-to-DANTE bridge definitions.

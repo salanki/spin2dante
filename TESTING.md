@@ -60,6 +60,12 @@ Notes:
 ## Quick Start
 
 ```sh
+# Fast offline analyzer tests (no Docker required)
+make test-analyzer
+
+# Deterministic clock-drift correction through real PTP and DANTE capture
+make test-drift
+
 # Single-stream E2E test (1 bridge, 1 receiver)
 make test
 
@@ -80,6 +86,139 @@ make test INFERNO_DIR=/path/to/inferno
 ```
 
 The Makefile handles building the bridge image, the inferno2pipe image (with submodule init), the Music Assistant helper workflow, and the docker-compose based test runs.
+
+## Audio Artifact Analyzer (`make test-analyzer`)
+
+`test/common/audio_artifact_analyzer.py` compares an interleaved signed-i32
+capture with the deterministic reference and reports local discontinuities
+instead of reducing the whole capture to pass/fail after the first differing
+sample. It classifies:
+
+- `zero_gap`: zero frames inserted into the capture
+- `duplicate`: one or more repetitions of the preceding capture frame
+- `insertion`: other extra capture frames
+- `drop`: reference frames absent from the capture
+- `mutation`: samples that differ without a nearby timing re-alignment
+- `desync`: a larger mixed disturbance followed by successful re-acquisition
+
+The analyzer searches up to 64 frames for a re-alignment and requires eight
+following frames to match, avoiding false classification from a single
+coincidental sample. If that local search fails, it performs one sparse,
+long-range re-acquisition instead of scanning a permanently shifted tail one
+frame at a time. Its JSON result includes event locations and durations, frame
+totals by kind, the largest correction, and the largest boundary discontinuity
+normalized to signed-i32 full scale.
+
+The default quality gate permits a one-frame duplicate or drop, representing
+the smallest possible discrete correction. It rejects zero-fill, arbitrary
+sample mutation, and any timing correction longer than one frame. Override the
+size threshold with `--allowed-event-frames`.
+
+```sh
+python3 test/common/audio_artifact_analyzer.py \
+  --reference test-shared/reference_capture.raw \
+  --capture test-shared/capture.raw \
+  --json
+```
+
+The command exits nonzero when the capture violates the quality gate, so it can
+be added to an E2E validator. The unit suite includes a regression fixture for
+the former anchor-shift behavior: inserting 12 zero frames is classified as a
+0.25 ms `zero_gap` and rejected. This makes that audible-risk behavior
+measurable without listening.
+
+References must contain complete interleaved frames. A partial trailing capture
+frame is ignored because live `inferno2pipe` snapshots can occur between sample
+writes and that incomplete frame contains no analyzable audio.
+
+Like the existing bit-perfect comparator, analysis starts at the first exact
+alignment window. An artifact before that window or in an unmatched trailing
+suffix is outside the analyzed interval.
+
+The bit-perfect comparator reports both the overall frame match ratio and the
+longest contiguous exact run. Its gate passes when that longest run meets
+`--min-run-seconds` and the overall match ratio meets
+`--min-match-ratio` (default `0.99`). A short capture-path mutation is still
+reported, but no longer erases evidence of the valid audio before or after it;
+a badly degraded capture cannot pass on one clean window alone.
+
+The single-stream and multi-stream E2E validators also run the artifact
+analyzer as a diagnostic and preserve its JSON output. The comparator remains
+the primary gate; analyzer output attributes any mismatch to classified
+single-frame timing corrections or to unsafe/unclassified transport artifacts.
+Analyzer or diagnostic-summary failures are reported but cannot override the
+comparator's exit status.
+
+## Deterministic Drift Correction (`make test-drift`)
+
+This test exercises the production bridge and DANTE transmit/receive path,
+rather than calling the correction helper in isolation:
+
+- A custom Sendspin server responds to the normal clock-sync exchange but runs
+  its advertised clock at `-250 ppm`.
+- The server emits deterministic 24-bit stereo PCM and a matching signed-i32
+  reference.
+- The real bridge is clocked by the test PTPv2 follower and sends through
+  Inferno/DANTE to `inferno2pipe`.
+- After discovery and subscription, the validator signals the source to start
+  a deterministic 35-second capture window, parses the bridge's cumulative
+  correction metrics, and runs the artifact analyzer.
+
+The bridge uses sendspin-rs `CorrectionPlanner` for its deadband, hysteresis,
+reanchor decision, and correction cadence. It applies that plan to complete
+stereo frames in the pending audio: a slow source timeline repeats the
+preceding frame, while a fast source timeline drops a frame. Each applied
+correction moves the scheduler anchor by the same single-frame amount, so
+future chunks remain contiguous instead of exposing unwritten ring-buffer
+samples as silence.
+
+Drift measurements use a three-sample median before reaching the planner. This
+rejects a one-tick PTP/read-position outlier without hiding sustained drift.
+Planner cadence changes in the same direction preserve the correction
+counter's progress.
+
+The five-second `[sync]` log reports cumulative frame counts:
+`drift_corrections` is the total number of corrected frames,
+`drift_inserted_frames` counts repeated frames, and
+`drift_dropped_frames` counts removed frames. These are process-lifetime
+counters, not correction-check counts.
+
+The deterministic test settings are:
+
+| Setting | Value |
+|---|---:|
+| Sendspin clock skew | `-250 ppm` |
+| `--buffer-ms` | `5` |
+| `--server-buffer-ms` | `2000` |
+| `--drift-threshold-ms` | `1` |
+| `--drift-check-interval-ms` | `250` |
+| `--max-correction-samples-per-tick` | `12` |
+| Capture interval | `35 s` |
+
+The correction-specific gate requires observed single-frame duplicates, no
+wrong-direction corrections, no multi-frame duplicate/drop/insertion event,
+and no 12-frame zero gap associated with the old anchor shift. The analyzer
+also reports the stricter full-capture quality result. On an overloaded Docker
+host, Inferno may log `tx lag ... dropout occurs!` and create unrelated,
+usually isolated capture gaps; these remain visible in the JSON report but do
+not masquerade as bridge correction failures.
+
+Detailed results are written to `/shared/drift_analysis.json` in the Compose
+`shared` volume. Preserve a failed run for inspection by avoiding
+`make clean`; `make test-drift` removes containers but not the volume.
+Compose is instructed to return the validator container's exit code explicitly,
+and the finite test source closes its listener but remains alive until teardown.
+This prevents a dependency exit from masking or interrupting validation.
+
+A passing run observes isolated one-frame duplicates for the deliberately slow
+clock, no wrong-direction drops, and no batched zero gap. Exact event counts
+depend on startup timing and host scheduling; inspect
+`/shared/drift_analysis.json` for the measurements from the current run.
+
+The netaudio-based validators use `python:3.13-slim`. Netaudio publishes a
+compatible manylinux wheel, but no musllinux wheel for Python 3.13; Alpine
+therefore attempts a source build and requires a Rust toolchain. A newer Alpine
+base does not remove that packaging distinction.
 
 ## Interactive Music Assistant Test (`make test-ma-interactive`)
 
@@ -475,6 +614,7 @@ Tested and validated via `make test-resilience`:
 ## Known Limitations
 
 - **Bit-perfect over overlap, not full-boundary perfection**: The automated check allows an unknown dropped prefix/suffix. It proves the received overlap matches exactly, but it does not require sample 0 of the source to be present.
+- **Artifact analysis begins at exact alignment**: The offline artifact analyzer can localize corrections after its first exact 64-frame alignment window. It cannot classify an artifact hidden in an unmatched startup prefix or trailing suffix.
 - **Sendspin source is 16-bit**: The `sendspin serve` CLI hardcodes its audio decoder to `s16` (16-bit signed) via PyAV, regardless of the input file's bit depth. A 24-bit WAV is truncated to 16-bit before being sent as "24-bit PCM." The test reference signal is generated at 16-bit to match this reality. True 24-bit end-to-end testing requires a Sendspin server that preserves 24-bit samples.
 - **PTP clock warmup**: 10-15s of "clock unavailable" is normal while the Statime follower syncs to the master. The bridge auto-realigns once the clock becomes available.
 - **Single-run test audio**: The 30s deterministic reference loops only if sendspin loops it. After 30s, the stream may end.

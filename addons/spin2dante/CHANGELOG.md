@@ -16,9 +16,19 @@
   | 50 | 77 | 5 | 7 |
 
   Mute behavior, the 20 ms anti-click ramp, bit-perfect passthrough at 100% (steady state), and `volume_control: none` mode are unchanged. See the add-on documentation ("Converting volumes from older versions") for details.
-- Lowered the default `server_buffer_ms` from 2000 ms to **500 ms**. `buffer_capacity` also bounds volume/mute control latency — Music Assistant delivers control commands over the same Sendspin connection, *behind* the buffered audio, so worst-case control lag ≈ `server_buffer_ms`. Validated on a live 21-zone deployment: 2000 ms produced ~2.2 s mute/volume lag while 500 ms feels instant, with **zero** late-binary skips at either value (deepest send-ahead observed ~360 ms). 500 ms balances ~2.5× the old 200 ms skip headroom against snappy controls. Raise for more skip tolerance (slower volume); lower for the opposite. (The gain is applied bridge-side at drain, after the pending queue, so the buffer never pre-attenuates audio — the lag is purely the control message queued behind audio in MA.)
 
 > Maintainer note: set the real image sha as the version in `config.yaml` and this header on build/release.
+
+## sha-fc118da — 2026-07-27
+
+### Added
+- **Gradual clock-drift correction.** The bridge now uses the sendspin-rs correction planner to schedule isolated complete stereo-frame repeats (slow source clock) or drops (fast source clock) instead of shifting the scheduler anchor in place. Each event is a single frame (20.8 µs at 48 kHz) and the planner spreads events over time. This removes the up-to-12-frame zero gap (~0.25 ms waveform discontinuity, a plausible audible pop) that the old anchor shift could expose during correction. Drift measurements pass through a three-sample median filter; ring-scale anomalies and planner reanchor requests still fall back to a full rebuffer for safety.
+- Cumulative correction counters (`drift_inserted_frames` / `drift_dropped_frames`) in the periodic `[sync]` log line, with terminal totals logged on stream end — every applied correction is accounted for in the logs.
+
+### Changed
+- `max_correction_samples_per_tick` now caps the **average single-frame repeat/drop cadence** per drift-check interval rather than the maximum anchor shift. Set to `0` to disable drift correction entirely (the option schema now allows `0`). `drift_threshold_ms` is unchanged in meaning: correction begins once filtered drift exceeds it. Option descriptions and translations updated to match.
+- PCM transport remains bit-exact except for the logged single-frame timing corrections above (and software gain when bridge-side volume is enabled below 100%).
+- Lowered the default `server_buffer_ms` from 2000 ms to **500 ms**. `buffer_capacity` also bounds volume/mute control latency — Music Assistant delivers control commands over the same Sendspin connection, *behind* the buffered audio, so worst-case control lag ≈ `server_buffer_ms`. Validated on a live 21-zone deployment: 2000 ms produced ~2.2 s mute/volume lag while 500 ms feels instant, with **zero** late-binary skips at either value (deepest send-ahead observed ~360 ms). 500 ms balances ~2.5× the old 200 ms skip headroom against snappy controls. Raise for more skip tolerance (slower volume); lower for the opposite. (The gain is applied bridge-side at drain, after the pending queue, so the buffer never pre-attenuates audio — the lag is purely the control message queued behind audio in MA.)
 
 ## sha-9b05ab9 — 2026-06-22
 
