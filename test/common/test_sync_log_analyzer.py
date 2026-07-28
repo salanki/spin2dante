@@ -18,9 +18,9 @@ def sync_line(
         f'bridge_id={bridge_id} bridge_name="{bridge_id} zone" '
         f"client_id=client-{bridge_id} session={session} "
         f"stream_start_us={stream_start_us} mode=scheduled "
-        f"playout_key_valid=1 playout_key_frames={offset} drift_valid=1 "
-        f"drift_since_anchor_frames=0 drift_since_anchor_us=0 "
-        f"raw_drift_since_anchor_frames=0 anchor_correction_frames=0 pending=0 "
+        f"drift_valid=1 drift_since_anchor_frames={offset} "
+        f"drift_since_anchor_us=0 raw_drift_since_anchor_frames={offset} "
+        f"anchor_correction_frames=0 pending=0 "
         f"stale_drops={stale_drops} trims=0/0 high_water=1 "
         f"drift_corrections=0 drift_inserted_frames=0 "
         f"drift_dropped_frames=0 rebuffers={rebuffers} drift_checks_skipped=0"
@@ -35,7 +35,7 @@ class SyncLogAnalyzerTest(unittest.TestCase):
 
         self.assertEqual(record.bridge_id, "livingroom")
         self.assertEqual(record.bridge_name, "livingroom zone")
-        self.assertEqual(record.playout_key_frames, -72)
+        self.assertEqual(record.drift_since_anchor_frames, -72)
 
     def test_reports_largest_pair_and_percentiles(self):
         lines = [
@@ -118,6 +118,33 @@ class SyncLogAnalyzerTest(unittest.TestCase):
         self.assertEqual(result["bucket_seconds"], 120)
         self.assertEqual(result["comparable_samples"], 3)
         self.assertEqual(result["skew_frames"]["maximum"], 120)
+        self.assertLessEqual(
+            result["max_pairwise_skew"]["time_span_seconds"], 10
+        )
+
+    def test_rejects_records_too_far_apart_in_same_window(self):
+        lines = [
+            sync_line("2026-07-28T16:00:00Z", "livingroom", 0),
+            sync_line("2026-07-28T16:01:53Z", "office", 1_130),
+        ]
+
+        result = analyze_sync_logs("\n".join(lines))
+
+        self.assertEqual(result["comparable_samples"], 0)
+        self.assertEqual(result["rejected_time_gap_buckets"], 1)
+        self.assertIsNone(result["skew_ms"]["maximum"])
+
+    def test_counts_invalid_sync_records_separately(self):
+        valid = sync_line("2026-07-28T16:00:00Z", "livingroom", -72)
+        invalid = sync_line("2026-07-28T16:00:05Z", "office", -70).replace(
+            "drift_valid=1", "drift_valid=0"
+        )
+
+        result = analyze_sync_logs("\n".join([valid, invalid]))
+
+        self.assertEqual(result["sync_records_seen"], 2)
+        self.assertEqual(result["valid_sync_records"], 1)
+        self.assertEqual(result["skipped_sync_records"], 1)
 
     def test_rust_debug_only_escape_does_not_abort_parser(self):
         line = sync_line("2026-07-28T16:00:00Z", "livingroom", -72).replace(

@@ -35,7 +35,7 @@ class SyncRecord:
     bridge_name: str
     session: int
     stream_start_us: int
-    playout_key_frames: int
+    drift_since_anchor_frames: int
     fields: dict[str, str]
 
 
@@ -63,12 +63,12 @@ def parse_sync_line(line: str) -> SyncRecord | None:
         "bridge_id",
         "session",
         "stream_start_us",
-        "playout_key_valid",
-        "playout_key_frames",
+        "drift_valid",
+        "drift_since_anchor_frames",
     )
     if (
         any(key not in fields for key in required)
-        or fields["playout_key_valid"] != "1"
+        or fields["drift_valid"] != "1"
     ):
         return None
     timestamp = datetime.fromisoformat(match.group("timestamp").replace("Z", "+00:00"))
@@ -78,7 +78,7 @@ def parse_sync_line(line: str) -> SyncRecord | None:
         bridge_name=fields.get("bridge_name", fields["bridge_id"]),
         session=int(fields["session"]),
         stream_start_us=int(fields["stream_start_us"]),
-        playout_key_frames=int(fields["playout_key_frames"]),
+        drift_since_anchor_frames=int(fields["drift_since_anchor_frames"]),
         fields=fields,
     )
 
@@ -103,13 +103,21 @@ def analyze_sync_logs(
     *,
     sample_rate: int = 48_000,
     bucket_seconds: int = 120,
+    max_pair_time_gap_seconds: float = 10.0,
     trend_threshold_ms: float = 1.0,
 ) -> dict:
+    lines = text.splitlines()
+    sync_records_seen = sum(LOG_RE.match(line.strip()) is not None for line in lines)
     records = [
         record
-        for line in text.splitlines()
+        for line in lines
         if (record := parse_sync_line(line)) is not None
     ]
+    skipped_sync_records = sync_records_seen - len(records)
+
+    # Windows are relative to the earliest record available for each stream.
+    # Rotating or truncating a log can therefore shift window boundaries; the
+    # time-span guard below keeps that from creating distant comparisons.
     stream_origins: dict[int, datetime] = {}
     for record in records:
         if record.stream_start_us != 0:
@@ -131,29 +139,38 @@ def analyze_sync_logs(
             buckets[key][record.bridge_id] = record
 
     samples = []
+    rejected_time_gap_buckets = 0
     for (stream_start_us, _), by_bridge in sorted(buckets.items()):
         if len(by_bridge) < 2:
             continue
+        timestamps = [record.timestamp for record in by_bridge.values()]
+        time_span_seconds = (max(timestamps) - min(timestamps)).total_seconds()
+        if time_span_seconds > max_pair_time_gap_seconds:
+            rejected_time_gap_buckets += 1
+            continue
         ordered = sorted(
             by_bridge.values(),
-            key=lambda record: record.playout_key_frames,
+            key=lambda record: record.drift_since_anchor_frames,
         )
         low = ordered[0]
         high = ordered[-1]
-        spread = high.playout_key_frames - low.playout_key_frames
+        spread = (
+            high.drift_since_anchor_frames - low.drift_since_anchor_frames
+        )
         samples.append(
             {
                 "timestamp": max(record.timestamp for record in ordered).isoformat(),
+                "time_span_seconds": time_span_seconds,
                 "stream_start_us": stream_start_us,
                 "bridge_count": len(ordered),
                 "skew_frames": spread,
                 "skew_us": spread * 1_000_000 / sample_rate,
                 "low_bridge_id": low.bridge_id,
                 "low_bridge_name": low.bridge_name,
-                "low_playout_key_frames": low.playout_key_frames,
+                "low_drift_since_anchor_frames": low.drift_since_anchor_frames,
                 "high_bridge_id": high.bridge_id,
                 "high_bridge_name": high.bridge_name,
-                "high_playout_key_frames": high.playout_key_frames,
+                "high_drift_since_anchor_frames": high.drift_since_anchor_frames,
             }
         )
 
@@ -206,10 +223,14 @@ def analyze_sync_logs(
 
     comparable = bool(spreads)
     return {
-        "parsed_sync_records": len(records),
+        "sync_records_seen": sync_records_seen,
+        "valid_sync_records": len(records),
+        "skipped_sync_records": skipped_sync_records,
         "comparable_samples": len(samples),
+        "rejected_time_gap_buckets": rejected_time_gap_buckets,
         "sample_rate": sample_rate,
         "bucket_seconds": bucket_seconds,
+        "max_pair_time_gap_seconds": max_pair_time_gap_seconds,
         "trend_threshold_ms": trend_threshold_ms,
         "max_pairwise_skew": max_sample,
         "skew_frames": {
@@ -246,6 +267,7 @@ def main() -> int:
     )
     parser.add_argument("--sample-rate", type=int, default=48_000)
     parser.add_argument("--bucket-seconds", type=int, default=120)
+    parser.add_argument("--max-pair-time-gap-seconds", type=float, default=10.0)
     parser.add_argument("--trend-threshold-ms", type=float, default=1.0)
     args = parser.parse_args()
 
@@ -257,6 +279,7 @@ def main() -> int:
         text,
         sample_rate=args.sample_rate,
         bucket_seconds=args.bucket_seconds,
+        max_pair_time_gap_seconds=args.max_pair_time_gap_seconds,
         trend_threshold_ms=args.trend_threshold_ms,
     )
     print(json.dumps(result, indent=2, sort_keys=True))

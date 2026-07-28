@@ -197,24 +197,22 @@ stream session. `stream_start_us` is the first Sendspin audio timestamp seen in
 that session; records with the same nonzero value carry the same source
 timeline and can be compared.
 
-`playout_key_frames` is the median-filtered live value of
-`DANTE read position + configured prebuffer - Sendspin server time in frames`.
-It is independent of each bridge's scheduler anchor and retains constant
-anchor or `buffer_ms` differences. Subtract the values from two records in the
-same reporting window to estimate their electronic playout skew. At 48 kHz,
-48 frames = 1 ms.
+`drift_since_anchor_frames` is the median-filtered DANTE read-position error
+against the bridge's scheduler mapping. That mapping pairs the globally shared
+DANTE/PTP read clock with Sendspin server time, and applied corrections move
+the anchor, so the metric retains both anchor-placement error and correction
+effects. The configured prebuffer cancels from the result. Subtract
+simultaneous records from two bridges on the same stream to estimate electronic
+playout skew. At 48 kHz, 48 frames = 1 ms.
 
-`drift_since_anchor_frames` is different: it is the error against that
-bridge's own scheduler anchor and drives gradual correction, but constant
-cross-bridge anchor offsets cancel out of it. Do not use it or the
-process-lifetime inserted/dropped counters as a substitute for the playout key.
+Do not infer current skew from process-lifetime inserted/dropped counters.
 
 Example:
 
 ```text
 [sync] bridge_id=livingroom bridge_name="Living Room" ... session=1 \
-stream_start_us=1842000000 playout_key_valid=1 playout_key_frames=43210 \
-drift_valid=1 drift_since_anchor_frames=-72 drift_since_anchor_us=-1500 \
+stream_start_us=1842000000 drift_valid=1 drift_since_anchor_frames=-72 \
+drift_since_anchor_us=-1500 \
 raw_drift_since_anchor_frames=-65 anchor_correction_frames=174 ...
 ```
 
@@ -229,12 +227,19 @@ It reports maximum, median, and p95 pairwise skew; the two bridges at the
 maximum; whether each stream's spread is growing or reconverging; and maximum
 fault counters. Records from different `stream_start_us` values are never
 compared. Its default 120-second, stream-relative windows tolerate normal
-per-process logging phase differences. No comparable records produce `null`
-skew fields rather than a misleading zero.
+per-process logging phase differences, but records more than 10 seconds apart
+are rejected rather than treated as simultaneous. No comparable records
+produce `null` skew fields rather than a misleading zero. Output also
+distinguishes all seen records from valid and skipped records. Window origins
+come from the earliest record available for each stream, so rotated or
+truncated inputs can shift window boundaries; the time-gap guard remains
+authoritative.
 
 INFO summaries default to every two minutes to preserve useful history on
-multi-bridge installations. Correction start/stop events remain immediate at
-INFO; cadence-only adjustments and five-second sync/buffer snapshots are
+multi-bridge installations. Processes use shared wall-clock slots so periodic
+records are emitted close enough together for comparison; track changes and
+rebuffers preserve the cadence. Correction start/stop events remain immediate
+at INFO; cadence-only adjustments and five-second sync/buffer snapshots are
 DEBUG-level. Warnings and errors are never rate-limited.
 
 ## Notes

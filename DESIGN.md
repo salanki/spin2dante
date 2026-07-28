@@ -145,17 +145,13 @@ amount during the current drain pass. This keeps later queued targets
 contiguous. Cumulative inserted and dropped frame counts are emitted in the
 periodic `[sync]` metric and are reconciled with capture analysis in the
 deterministic drift test. The same record includes bridge attribution, a local
-stream sequence, the first Sendspin timestamp, and two distinct clock metrics:
-
-- `drift_since_anchor_frames` is the filtered read-position error against that
-  bridge's own scheduler anchor and drives gradual correction.
-- `playout_key_frames` is the filtered live equivalent of
-  `read_pos + prebuffer_target - server_time_frames`. Its difference between
-  bridges on the same stream retains constant anchor and buffer offsets, making
-  it the operational inter-bridge skew measurement.
-
-Lifetime correction-counter differences are not used as a substitute for the
-current playout key.
+stream sequence, the first Sendspin timestamp, and
+`drift_since_anchor_frames`: the filtered read-position error against that
+bridge's scheduler mapping. The anchor pairs the globally shared DANTE/PTP read
+clock with Sendspin server time, and every correction moves that anchor, so
+pairwise drift differences retain both anchor-placement error and applied
+corrections. The configured prebuffer cancels from this output metric.
+Lifetime correction-counter differences are not used as a substitute.
 
 The resulting stream is bit-perfect modulo these declared one-frame timing
 events. At 48kHz each event is 20.8 microseconds; corrections are distributed

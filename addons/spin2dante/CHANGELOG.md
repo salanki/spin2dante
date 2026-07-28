@@ -3,8 +3,8 @@
 ## Unreleased
 
 - Attribute `[sync]` and drift-schedule records with bridge and stream context,
-  expose an anchor-independent absolute playout key plus filtered/raw
-  per-anchor drift and signed correction, and add an offline analyzer for maximum/p95
+  expose filtered/raw scheduler-output drift and signed correction, and add an
+  offline analyzer for maximum/p95
   inter-bridge skew and trend direction.
 - Preserve multi-bridge log history with a configurable 120-second default
   INFO summary interval; retain five-second detail and cadence-only correction
