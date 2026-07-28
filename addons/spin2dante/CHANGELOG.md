@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## sha-ea871b1 — 2026-07-28
 
 ### Added
 - **Attributed sync diagnostics.** Every periodic `[sync]` record now identifies its source and its position on the shared timeline: `bridge_id`, `bridge_name`, `client_id`, a process-local `session` counter, and `stream_start_us` (the first Sendspin audio timestamp of that session). Alongside them are `playout_offset_frames`/`_us`, `prebuffer_frames`, `drift_since_anchor_frames`/`_us`, `raw_drift_since_anchor_frames`, and `anchor_correction_frames` — the signed correction applied to the current scheduler anchor, which resets with the anchor rather than accumulating for the process lifetime. Drift-correction schedule records carry the same attribution.
