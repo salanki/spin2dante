@@ -82,6 +82,35 @@ class SyncLogAnalyzerTest(unittest.TestCase):
         self.assertIsNone(result["max_pairwise_skew"])
         self.assertIsNone(result["skew_frames"]["maximum"])
         self.assertIsNone(result["skew_ms"]["maximum"])
+        self.assertEqual(
+            result["bridges_never_compared"],
+            [
+                {"id": "livingroom", "name": "livingroom zone"},
+                {"id": "office", "name": "office zone"},
+            ],
+        )
+
+    def test_singleton_reconnected_stream_is_named_as_never_compared(self):
+        lines = [
+            sync_line("2026-07-28T16:00:00Z", "livingroom", -48),
+            sync_line("2026-07-28T16:00:02Z", "office", 48),
+            sync_line(
+                "2026-07-28T16:00:03Z",
+                "pooldeck",
+                9_600,
+                stream_start_us=2_000_000,
+            ),
+        ]
+
+        result = analyze_sync_logs("\n".join(lines))
+
+        self.assertEqual(result["comparable_samples"], 1)
+        self.assertEqual(result["skew_ms"]["maximum"], 2.0)
+        self.assertEqual(result["rejected_time_gap_buckets"], 0)
+        self.assertEqual(
+            result["bridges_never_compared"],
+            [{"id": "pooldeck", "name": "pooldeck zone"}],
+        )
 
     def test_keeps_latest_bridge_record_within_bucket(self):
         lines = [

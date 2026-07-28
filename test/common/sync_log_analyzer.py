@@ -164,7 +164,6 @@ def analyze_sync_logs(
     rejected_time_gap_buckets = 0
     partial_time_gap_buckets = 0
     excluded_bridge_counts: dict[str, int] = {}
-    excluded_bridge_ids_seen: set[str] = set()
     compared_bridge_ids: set[str] = set()
     bridge_names = {record.bridge_id: record.bridge_name for record in records}
     for (stream_start_us, _), by_bridge in sorted(buckets.items()):
@@ -187,7 +186,6 @@ def analyze_sync_logs(
         if excluded:
             partial_time_gap_buckets += 1
             for record in excluded:
-                excluded_bridge_ids_seen.add(record.bridge_id)
                 excluded_bridge_counts[record.bridge_id] = (
                     excluded_bridge_counts.get(record.bridge_id, 0) + 1
                 )
@@ -274,7 +272,7 @@ def analyze_sync_logs(
             )
 
     comparable = bool(spreads)
-    never_compared_ids = sorted(excluded_bridge_ids_seen - compared_bridge_ids)
+    never_compared_ids = sorted(set(bridge_names) - compared_bridge_ids)
     return {
         "sync_records_seen": sync_records_seen,
         "valid_sync_records": len(records),

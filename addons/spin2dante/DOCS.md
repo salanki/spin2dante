@@ -231,12 +231,14 @@ per-process logging phase differences, but records more than 10 seconds apart
 are not treated as simultaneous. The analyzer keeps the largest coherent
 subset, reports excluded bridges as paired ID/name objects and aggregate
 counts, and only rejects the entire window when no valid pair remains.
-`bridges_never_compared` calls out a persistently late zone so a clean subset
-maximum cannot be mistaken for all-zone health. No comparable records produce
-`null` skew fields rather than a misleading zero. Output also distinguishes all
-seen records from valid and skipped records. Window origins come from the
-earliest record available for each stream, so rotated or truncated inputs can
-shift window boundaries; the time-gap guard remains authoritative.
+`bridges_never_compared` calls out every valid zone that never participated in
+a comparison, including a persistently late zone or one that reconnected with
+a different `stream_start_us`, so a clean subset maximum cannot be mistaken for
+all-zone health. No comparable records produce `null` skew fields rather than a
+misleading zero. Output also distinguishes all seen records from valid and
+skipped records. Window origins come from the earliest record available for
+each stream, so rotated or truncated inputs can shift window boundaries; the
+time-gap guard remains authoritative.
 
 INFO summaries default to every two minutes to preserve useful history on
 multi-bridge installations. Processes use shared wall-clock slots so periodic
