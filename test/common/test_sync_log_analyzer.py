@@ -150,10 +150,31 @@ class SyncLogAnalyzerTest(unittest.TestCase):
         self.assertEqual(result["excluded_bridge_counts"], {"pooldeck": 1})
         self.assertEqual(result["skew_ms"]["maximum"], 2.0)
         self.assertEqual(
-            result["max_pairwise_skew"]["excluded_bridge_ids"], ["pooldeck"]
+            result["max_pairwise_skew"]["excluded_bridges"],
+            [{"id": "pooldeck", "name": "pooldeck zone"}],
+        )
+        self.assertEqual(
+            result["bridges_never_compared"],
+            [{"id": "pooldeck", "name": "pooldeck zone"}],
         )
         self.assertEqual(result["max_pairwise_skew"]["bridge_count"], 2)
         self.assertEqual(result["max_pairwise_skew"]["observed_bridge_count"], 3)
+
+    def test_bridge_excluded_once_but_compared_later_is_not_never_compared(self):
+        lines = [
+            sync_line("2026-07-28T16:00:00Z", "livingroom", -48),
+            sync_line("2026-07-28T16:00:02Z", "office", 48),
+            sync_line("2026-07-28T16:01:53Z", "pooldeck", 1_130),
+            sync_line("2026-07-28T16:02:00Z", "livingroom", -50),
+            sync_line("2026-07-28T16:02:02Z", "office", 46),
+            sync_line("2026-07-28T16:02:04Z", "pooldeck", 47),
+        ]
+
+        result = analyze_sync_logs("\n".join(lines))
+
+        self.assertEqual(result["comparable_samples"], 2)
+        self.assertEqual(result["partial_time_gap_buckets"], 1)
+        self.assertEqual(result["bridges_never_compared"], [])
 
     def test_counts_invalid_sync_records_separately(self):
         valid = sync_line("2026-07-28T16:00:00Z", "livingroom", -72)

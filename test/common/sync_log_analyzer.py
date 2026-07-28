@@ -164,6 +164,9 @@ def analyze_sync_logs(
     rejected_time_gap_buckets = 0
     partial_time_gap_buckets = 0
     excluded_bridge_counts: dict[str, int] = {}
+    excluded_bridge_ids_seen: set[str] = set()
+    compared_bridge_ids: set[str] = set()
+    bridge_names = {record.bridge_id: record.bridge_name for record in records}
     for (stream_start_us, _), by_bridge in sorted(buckets.items()):
         if len(by_bridge) < 2:
             continue
@@ -184,6 +187,7 @@ def analyze_sync_logs(
         if excluded:
             partial_time_gap_buckets += 1
             for record in excluded:
+                excluded_bridge_ids_seen.add(record.bridge_id)
                 excluded_bridge_counts[record.bridge_id] = (
                     excluded_bridge_counts.get(record.bridge_id, 0) + 1
                 )
@@ -194,6 +198,7 @@ def analyze_sync_logs(
             coherent,
             key=lambda record: record.drift_since_anchor_frames,
         )
+        compared_bridge_ids.update(record.bridge_id for record in ordered)
         low = ordered[0]
         high = ordered[-1]
         spread = (
@@ -206,12 +211,10 @@ def analyze_sync_logs(
                 "stream_start_us": stream_start_us,
                 "bridge_count": len(ordered),
                 "observed_bridge_count": len(by_bridge),
-                "excluded_bridge_ids": sorted(
-                    record.bridge_id for record in excluded
-                ),
-                "excluded_bridge_names": sorted(
-                    record.bridge_name for record in excluded
-                ),
+                "excluded_bridges": [
+                    {"id": record.bridge_id, "name": record.bridge_name}
+                    for record in sorted(excluded, key=lambda record: record.bridge_id)
+                ],
                 "skew_frames": spread,
                 "skew_us": spread * 1_000_000 / sample_rate,
                 "low_bridge_id": low.bridge_id,
@@ -271,6 +274,7 @@ def analyze_sync_logs(
             )
 
     comparable = bool(spreads)
+    never_compared_ids = sorted(excluded_bridge_ids_seen - compared_bridge_ids)
     return {
         "sync_records_seen": sync_records_seen,
         "valid_sync_records": len(records),
@@ -280,6 +284,10 @@ def analyze_sync_logs(
         "partial_time_gap_buckets": partial_time_gap_buckets,
         "excluded_bridge_records": sum(excluded_bridge_counts.values()),
         "excluded_bridge_counts": excluded_bridge_counts,
+        "bridges_never_compared": [
+            {"id": bridge_id, "name": bridge_names[bridge_id]}
+            for bridge_id in never_compared_ids
+        ],
         "sample_rate": sample_rate,
         "bucket_seconds": bucket_seconds,
         "max_pair_time_gap_seconds": max_pair_time_gap_seconds,

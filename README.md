@@ -389,8 +389,9 @@ growing gap from reconvergence. The analyzer will not compare different
 `stream_start_us` values and reports `null`, not zero, when there is no
 comparable data. Records more than 10 seconds apart are rejected rather than
 treated as simultaneous. If one bridge is a straggler, the analyzer keeps the
-largest coherent subset and reports the excluded bridge IDs instead of
-discarding every other zone.
+largest coherent subset and reports excluded bridges as paired ID/name objects
+instead of discarding every other zone. `bridges_never_compared` makes a
+persistently late zone visible even when the retained subset has low skew.
 
 **Buffer status** (ring buffer fill level):
 ```

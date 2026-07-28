@@ -163,7 +163,8 @@ whole window. Its JSON output includes:
   medians and a 1 ms threshold;
 - maximum queue/drop/trim/rebuffer/skipped-check counters.
 - total, valid, and skipped sync-record counts, fully rejected windows, partial
-  windows, and excluded bridge IDs/counts.
+  windows, paired excluded bridge identities/counts, and bridges that were
+  excluded every time they appeared.
 
 Run it against a saved log with:
 
