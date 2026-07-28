@@ -116,6 +116,45 @@ When enabled:
 - At 100% volume with mute off, audio is bit-perfect (true no-op)
 - Volume changes use a smooth 20ms ramp to prevent clicks
 
+The volume slider uses a linear-in-dB (audio) taper: every step changes
+loudness by the same 0.4 dB, with 100% = full (bit-perfect) level, 75% ≈
+−10 dB, 50% ≈ −20 dB, and a smooth fade to true silence below 10%. This
+makes the whole slider range useful — not just the bottom half.
+
+### Converting volumes from older versions
+
+Versions up to `sha-9b05ab9` used a different curve (`(volume/100)^1.5`)
+where most of the audible range was crammed into 0–50%. With the new taper
+a given volume % is quieter than before (50% went from −9 dB to −20 dB).
+
+If you have **presets, automations, scenes, or scripts that set player
+volume**, convert stored values to keep the same loudness:
+
+`new = 100 − 75 × log10(100 / old)` (for old ≥ 7; round to nearest)
+
+For old volumes below 7 (rare — these were barely audible on the old
+curve), the converted value lands in the fade-to-silence region below the
+new taper's 10% knee, so use this formula instead:
+
+`new = 631 × (old / 100)^1.5` (for old < 7; round to nearest)
+
+Both formulas agree at the crossover (old ≈ 6.3 → new = 10), and the
+table below already uses the correct branch for every row.
+
+| Old | New | Old | New |
+|----:|----:|----:|----:|
+| 100 | 100 | 40 | 70 |
+| 90 | 97 | 30 | 61 |
+| 80 | 93 | 25 | 55 |
+| 75 | 91 | 20 | 48 |
+| 70 | 88 | 15 | 38 |
+| 60 | 83 | 10 | 25 |
+| 50 | 77 | 5 | 7 |
+
+The saved per-bridge volume state restored at startup is also affected the
+same way: the number is kept, so the zone will sound quieter until you
+nudge the slider up per the table.
+
 When set to `none` (the default), the bridge is a transparent passthrough with
 no volume capability advertised. This is the right choice when volume is
 controlled by the amplifier or via Home Assistant.

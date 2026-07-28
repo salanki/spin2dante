@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased — 2026-07-27
+
+### Changed
+- **Volume taper reworked — existing volumes/presets need converting.** Bridge-side volume (`volume_control: bridge`) now uses a linear-in-dB (audio) taper — 0.4 dB per 1% step, 100% = full level (still bit-perfect), 50% ≈ −20 dB, smooth fade to true silence below 10% — replacing the old `(volume/100)^1.5` curve that crammed the entire audible range into 0–50% and left 50–100% nearly flat. **A given volume % is now quieter than before** (e.g. 50% went from −9 dB to −20 dB). To keep the same loudness, convert any stored volume — Home Assistant automations, scenes, scripts, MA presets, and the per-bridge saved volume restored at startup — using `new = 100 − 75 × log10(100 / old)` for old ≥ 7, or `new = 631 × (old / 100)^1.5` for old < 7 (below the taper's 10% knee the fade-to-silence region needs the second formula; both agree at old ≈ 6.3 → new = 10; round to nearest):
+
+  | Old | New | Old | New |
+  |----:|----:|----:|----:|
+  | 100 | 100 | 40 | 70 |
+  | 90 | 97 | 30 | 61 |
+  | 80 | 93 | 25 | 55 |
+  | 75 | 91 | 20 | 48 |
+  | 70 | 88 | 15 | 38 |
+  | 60 | 83 | 10 | 25 |
+  | 50 | 77 | 5 | 7 |
+
+  Mute behavior, the 20 ms anti-click ramp, bit-perfect passthrough at 100% (steady state), and `volume_control: none` mode are unchanged. See the add-on documentation ("Converting volumes from older versions") for details.
+
+> Maintainer note: set the real image sha as the version in `config.yaml` and this header on build/release.
+
 ## sha-fc118da — 2026-07-27
 
 ### Added
