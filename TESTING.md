@@ -152,12 +152,13 @@ comparator's exit status.
 The same target also tests `test/common/sync_log_analyzer.py`. This separate
 log analyzer consumes attributed `[sync]` records, groups only bridges with the
 same nonzero `stream_start_us`, and compares their current
-`timeline_offset_frames` values in five-second reporting buckets. Its JSON
-output includes:
+`playout_key_frames` values in stream-relative 120-second windows by default.
+Its JSON output includes:
 
 - the maximum pairwise skew and affected bridge IDs/names;
 - median and p95 skew in frames and milliseconds;
-- per-stream growing/stable/reconverging classification;
+- per-stream growing/stable/reconverging classification using first/last-third
+  medians and a 1 ms threshold;
 - maximum queue/drop/trim/rebuffer/skipped-check counters.
 
 Run it against a saved log with:
@@ -165,6 +166,9 @@ Run it against a saved log with:
 ```bash
 python3 test/common/sync_log_analyzer.py spin2dante.log
 ```
+
+If no two records can be compared, skew values are `null`; zero means
+comparable bridges had an equal key.
 
 ## Deterministic Drift Correction (`make test-drift`)
 

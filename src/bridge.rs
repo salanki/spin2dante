@@ -74,6 +74,11 @@ fn metrics_info_due(last: Option<Instant>, now: Instant, interval: Duration) -> 
     last.map_or(true, |previous| now.duration_since(previous) >= interval)
 }
 
+fn playout_key_frames(read_pos: usize, prebuffer_target: usize, server_us: i64) -> i128 {
+    read_pos as i128 + prebuffer_target as i128
+        - server_us as i128 * SAMPLE_RATE as i128 / 1_000_000
+}
+
 // ─── Bridge state machine ───────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
@@ -218,12 +223,15 @@ pub struct SendspinBridge {
     max_correction_samples: usize,
     sync_log_interval: Duration,
     last_sync_info_log: Option<Instant>,
+    last_waiting_info_log: Option<Instant>,
     correction_planner: CorrectionPlanner,
     correction_state: CorrectionState,
     drift_history: VecDeque<isize>,
     last_drift_raw_samples: isize,
     last_drift_filtered_samples: isize,
     drift_sample_valid: bool,
+    last_playout_key_frames: i128,
+    playout_key_valid: bool,
     state: BridgeState,
     // Device + TX state (persistent for process lifetime)
     rb_inputs: Option<Vec<RBInput<Sample, OwnedBuffer<Atomic<Sample>>>>>,
@@ -346,12 +354,15 @@ impl SendspinBridge {
             max_correction_samples: max_correction_samples_per_tick,
             sync_log_interval: Duration::from_secs(sync_log_interval_seconds),
             last_sync_info_log: None,
+            last_waiting_info_log: None,
             correction_planner: CorrectionPlanner::new(),
             correction_state: CorrectionState::default(),
             drift_history: VecDeque::with_capacity(3),
             last_drift_raw_samples: 0,
             last_drift_filtered_samples: 0,
             drift_sample_valid: false,
+            last_playout_key_frames: 0,
+            playout_key_valid: false,
             state: BridgeState::Idle,
             rb_inputs: None,
             device_server: None,
@@ -657,6 +668,8 @@ impl SendspinBridge {
 
                     self.stream_seq = self.stream_seq.wrapping_add(1);
                     self.stream_start_us = None;
+                    self.last_sync_info_log = None;
+                    self.last_waiting_info_log = None;
                     self.queue_player_state();
 
                     if self.state == BridgeState::Running
@@ -799,8 +812,12 @@ impl SendspinBridge {
         self.last_drift_raw_samples = 0;
         self.last_drift_filtered_samples = 0;
         self.drift_sample_valid = false;
+        self.last_playout_key_frames = 0;
+        self.playout_key_valid = false;
         self.anchor_correction_frames = 0;
-        self.last_sync_info_log = None;
+        // Preserve the INFO cadence across a rebuffer. The warning describing
+        // the fault is immediate; repeated scheduler resets must not restore
+        // five-second INFO volume. A new stream/start resets the cadence.
         self.gain_ramp.reset_to_current();
     }
 
@@ -834,6 +851,8 @@ impl SendspinBridge {
         let elapsed_us = server_now_us - anchor_us;
         let expected_read_pos = expected_read_pos(anchor_pos, self.prebuffer_target, elapsed_us);
         let raw_drift_samples = wrapsub(actual_read_pos, expected_read_pos);
+        let raw_playout_key =
+            playout_key_frames(actual_read_pos, self.prebuffer_target, server_now_us);
         self.last_drift_raw_samples = raw_drift_samples;
 
         // A ring-scale excursion means scheduler state is unsafe. Do not wait
@@ -867,6 +886,12 @@ impl SendspinBridge {
         ]);
         self.last_drift_filtered_samples = drift_samples;
         self.drift_sample_valid = true;
+        // Apply the same median-filter correction to the anchor-independent
+        // key. Unlike drift_samples, this value retains a constant difference
+        // between bridges whose scheduler anchors or buffer targets differ.
+        self.last_playout_key_frames =
+            raw_playout_key + (drift_samples - raw_drift_samples) as i128;
+        self.playout_key_valid = true;
 
         if drift_samples.abs() > (self.ring_buffer_size / 4) as isize {
             warn!(
@@ -1462,13 +1487,15 @@ impl SendspinBridge {
         let drift_error_us =
             self.last_drift_filtered_samples as i64 * 1_000_000 / SAMPLE_RATE as i64;
         format!(
-            "[sync] bridge_id={} bridge_name={:?} client_id={} session={} stream_start_us={} mode={} drift_valid={} timeline_offset_frames={} timeline_offset_us={} raw_offset_frames={} anchor_correction_frames={} pending={} stale_drops={} trims={}/{} high_water={} drift_corrections={} drift_inserted_frames={} drift_dropped_frames={} rebuffers={} drift_checks_skipped={}",
+            "[sync] bridge_id={} bridge_name={:?} client_id={} session={} stream_start_us={} mode={} playout_key_valid={} playout_key_frames={} drift_valid={} drift_since_anchor_frames={} drift_since_anchor_us={} raw_drift_since_anchor_frames={} anchor_correction_frames={} pending={} stale_drops={} trims={}/{} high_water={} drift_corrections={} drift_inserted_frames={} drift_dropped_frames={} rebuffers={} drift_checks_skipped={}",
             self.bridge_id,
             self.device_name,
             self.client_id,
             self.stream_seq,
             self.stream_start_us.unwrap_or(0),
             mode,
+            u8::from(self.playout_key_valid),
+            self.last_playout_key_frames,
             u8::from(self.drift_sample_valid),
             self.last_drift_filtered_samples,
             drift_error_us,
@@ -1491,7 +1518,13 @@ impl SendspinBridge {
         match self.state {
             BridgeState::Idle => {}
             BridgeState::WaitingForSubscriber => {
-                info!("[buffer] waiting for DANTE subscriber");
+                let now = Instant::now();
+                if metrics_info_due(self.last_waiting_info_log, now, self.sync_log_interval) {
+                    self.last_waiting_info_log = Some(now);
+                    info!("[buffer] waiting for DANTE subscriber");
+                } else {
+                    debug!("[buffer] waiting for DANTE subscriber");
+                }
             }
             BridgeState::Running => {
                 let now = Instant::now();
@@ -1755,7 +1788,7 @@ mod tests {
     }
 
     #[test]
-    fn sync_metrics_include_attribution_and_current_timeline_offset() {
+    fn sync_metrics_include_attribution_playout_key_and_anchor_drift() {
         let mut bridge = SendspinBridge::new(
             "ws://unused".to_string(),
             "Living Room".to_string(),
@@ -1777,6 +1810,8 @@ mod tests {
         bridge.drift_sample_valid = true;
         bridge.last_drift_filtered_samples = -72;
         bridge.last_drift_raw_samples = -65;
+        bridge.playout_key_valid = true;
+        bridge.last_playout_key_frames = 43_210;
         bridge.anchor_correction_frames = 174;
 
         let message = bridge.sync_metrics_message("scheduled");
@@ -1785,10 +1820,21 @@ mod tests {
         assert!(message.contains("bridge_name=\"Living Room\""));
         assert!(message.contains("session=3"));
         assert!(message.contains("stream_start_us=1842000000"));
-        assert!(message.contains("timeline_offset_frames=-72"));
-        assert!(message.contains("timeline_offset_us=-1500"));
-        assert!(message.contains("raw_offset_frames=-65"));
+        assert!(message.contains("playout_key_valid=1"));
+        assert!(message.contains("playout_key_frames=43210"));
+        assert!(message.contains("drift_since_anchor_frames=-72"));
+        assert!(message.contains("drift_since_anchor_us=-1500"));
+        assert!(message.contains("raw_drift_since_anchor_frames=-65"));
         assert!(message.contains("anchor_correction_frames=174"));
+    }
+
+    #[test]
+    fn playout_key_retains_anchor_and_buffer_offsets() {
+        let server_us = 2_000_000;
+
+        assert_eq!(playout_key_frames(95_900, 100, server_us), 0);
+        assert_eq!(playout_key_frames(95_900 + 1_440, 100, server_us), 1_440);
+        assert_eq!(playout_key_frames(95_900, 100 + 2_400, server_us), 2_400);
     }
 
     #[test]

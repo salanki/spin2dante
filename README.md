@@ -358,8 +358,9 @@ warnings, errors, and correction start/stop events are immediate.
 **Sync status** (scheduler and queue health):
 ```
 [sync] bridge_id=kitchen bridge_name="Kitchen" client_id=... session=1 \
-stream_start_us=1842000000 mode=scheduled drift_valid=1 \
-timeline_offset_frames=-72 timeline_offset_us=-1500 raw_offset_frames=-65 \
+stream_start_us=1842000000 mode=scheduled playout_key_valid=1 \
+playout_key_frames=43210 drift_valid=1 drift_since_anchor_frames=-72 \
+drift_since_anchor_us=-1500 raw_drift_since_anchor_frames=-65 \
 anchor_correction_frames=174 pending=0 stale_drops=0 trims=0/0 high_water=1 ...
 ```
 
@@ -369,10 +370,12 @@ anchor_correction_frames=174 pending=0 stale_drops=0 trims=0/0 high_water=1 ...
 | `session` | Process-local accepted `stream/start` sequence |
 | `stream_start_us` | First Sendspin audio timestamp; compare only equal nonzero values |
 | `mode` | `scheduled` (anchor-based targeting active) or `sequential` (fallback) |
+| `playout_key_valid` | `1` once the three-sample filter has a current absolute playout key |
+| `playout_key_frames` | Filtered `read_pos + prebuffer_target - server_time_frames`; subtract two bridges for pairwise skew |
 | `drift_valid` | `1` once the three-sample drift filter has a current result |
-| `timeline_offset_frames` | Filtered signed playout error against the shared Sendspin/PTP timeline; subtract two bridges for pairwise skew |
-| `timeline_offset_us` | The same filtered error in microseconds |
-| `raw_offset_frames` | Latest unfiltered playout error |
+| `drift_since_anchor_frames` | Filtered signed error against this bridge's own scheduler anchor |
+| `drift_since_anchor_us` | The same per-anchor drift in microseconds |
+| `raw_drift_since_anchor_frames` | Latest unfiltered per-anchor drift |
 | `anchor_correction_frames` | Signed frame corrections applied to the current scheduler anchor |
 | `pending` | Chunks in the pending queue waiting to enter the ring |
 | `stale_drops` | Chunks dropped because their target was behind `read_pos` |
@@ -383,7 +386,8 @@ At 48 kHz, 48 frames = 1 ms. Use
 `test/common/sync_log_analyzer.py <log-file>` to calculate maximum, median,
 and p95 pairwise skew, identify the affected bridge pair, and distinguish a
 growing gap from reconvergence. The analyzer will not compare different
-`stream_start_us` values.
+`stream_start_us` values and reports `null`, not zero, when there is no
+comparable data.
 
 **Buffer status** (ring buffer fill level):
 ```

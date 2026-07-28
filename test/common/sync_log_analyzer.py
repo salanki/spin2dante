@@ -35,13 +35,19 @@ class SyncRecord:
     bridge_name: str
     session: int
     stream_start_us: int
-    timeline_offset_frames: int
+    playout_key_frames: int
     fields: dict[str, str]
 
 
 def _decode_value(value: str) -> str:
     if value.startswith('"'):
-        return json.loads(value)
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            # Rust's Debug formatter can emit escapes such as \u{7}, which are
+            # not JSON. Preserve the printable representation instead of
+            # aborting analysis because one bridge name contains an odd byte.
+            return value[1:-1]
     return value
 
 
@@ -57,10 +63,13 @@ def parse_sync_line(line: str) -> SyncRecord | None:
         "bridge_id",
         "session",
         "stream_start_us",
-        "drift_valid",
-        "timeline_offset_frames",
+        "playout_key_valid",
+        "playout_key_frames",
     )
-    if any(key not in fields for key in required) or fields["drift_valid"] != "1":
+    if (
+        any(key not in fields for key in required)
+        or fields["playout_key_valid"] != "1"
+    ):
         return None
     timestamp = datetime.fromisoformat(match.group("timestamp").replace("Z", "+00:00"))
     return SyncRecord(
@@ -69,7 +78,7 @@ def parse_sync_line(line: str) -> SyncRecord | None:
         bridge_name=fields.get("bridge_name", fields["bridge_id"]),
         session=int(fields["session"]),
         stream_start_us=int(fields["stream_start_us"]),
-        timeline_offset_frames=int(fields["timeline_offset_frames"]),
+        playout_key_frames=int(fields["playout_key_frames"]),
         fields=fields,
     )
 
@@ -93,18 +102,28 @@ def analyze_sync_logs(
     text: str,
     *,
     sample_rate: int = 48_000,
-    bucket_seconds: int = 5,
+    bucket_seconds: int = 120,
+    trend_threshold_ms: float = 1.0,
 ) -> dict:
     records = [
         record
         for line in text.splitlines()
         if (record := parse_sync_line(line)) is not None
     ]
+    stream_origins: dict[int, datetime] = {}
+    for record in records:
+        if record.stream_start_us != 0:
+            stream_origins[record.stream_start_us] = min(
+                stream_origins.get(record.stream_start_us, record.timestamp),
+                record.timestamp,
+            )
+
     buckets: dict[tuple[int, int], dict[str, SyncRecord]] = {}
     for record in records:
         if record.stream_start_us == 0:
             continue
-        bucket = int(record.timestamp.timestamp()) // bucket_seconds
+        elapsed = record.timestamp - stream_origins[record.stream_start_us]
+        bucket = int(elapsed.total_seconds()) // bucket_seconds
         key = (record.stream_start_us, bucket)
         # Keep the newest record if a bridge logs more than once in a bucket.
         previous = buckets.setdefault(key, {}).get(record.bridge_id)
@@ -117,11 +136,11 @@ def analyze_sync_logs(
             continue
         ordered = sorted(
             by_bridge.values(),
-            key=lambda record: record.timeline_offset_frames,
+            key=lambda record: record.playout_key_frames,
         )
         low = ordered[0]
         high = ordered[-1]
-        spread = high.timeline_offset_frames - low.timeline_offset_frames
+        spread = high.playout_key_frames - low.playout_key_frames
         samples.append(
             {
                 "timestamp": max(record.timestamp for record in ordered).isoformat(),
@@ -131,10 +150,10 @@ def analyze_sync_logs(
                 "skew_us": spread * 1_000_000 / sample_rate,
                 "low_bridge_id": low.bridge_id,
                 "low_bridge_name": low.bridge_name,
-                "low_offset_frames": low.timeline_offset_frames,
+                "low_playout_key_frames": low.playout_key_frames,
                 "high_bridge_id": high.bridge_id,
                 "high_bridge_name": high.bridge_name,
-                "high_offset_frames": high.timeline_offset_frames,
+                "high_playout_key_frames": high.playout_key_frames,
             }
         )
 
@@ -145,15 +164,30 @@ def analyze_sync_logs(
         stream_samples = [
             sample for sample in samples if sample["stream_start_us"] == stream_start_us
         ]
-        first = stream_samples[0]["skew_frames"]
-        last = stream_samples[-1]["skew_frames"]
+        third_size = max(1, len(stream_samples) // 3)
+        first = _percentile(
+            [sample["skew_frames"] for sample in stream_samples[:third_size]],
+            0.5,
+        )
+        last = _percentile(
+            [sample["skew_frames"] for sample in stream_samples[-third_size:]],
+            0.5,
+        )
         delta = last - first
+        trend_threshold_frames = trend_threshold_ms * sample_rate / 1000
         stream_trends[str(stream_start_us)] = {
             "samples": len(stream_samples),
-            "first_skew_frames": first,
-            "last_skew_frames": last,
+            "first_third_median_skew_frames": first,
+            "last_third_median_skew_frames": last,
             "delta_frames": delta,
-            "direction": "growing" if delta > 1 else "reconverging" if delta < -1 else "stable",
+            "threshold_frames": trend_threshold_frames,
+            "direction": (
+                "growing"
+                if delta > trend_threshold_frames
+                else "reconverging"
+                if delta < -trend_threshold_frames
+                else "stable"
+            ),
         }
 
     fault_maxima = {field: 0 for field in FAULT_FIELDS}
@@ -170,21 +204,31 @@ def analyze_sync_logs(
                 fault_maxima["trimmed_frames"], int(frames)
             )
 
+    comparable = bool(spreads)
     return {
         "parsed_sync_records": len(records),
         "comparable_samples": len(samples),
         "sample_rate": sample_rate,
         "bucket_seconds": bucket_seconds,
+        "trend_threshold_ms": trend_threshold_ms,
         "max_pairwise_skew": max_sample,
         "skew_frames": {
-            "median": _percentile(spreads, 0.5),
-            "p95": _percentile(spreads, 0.95),
-            "maximum": max(spreads, default=0),
+            "median": _percentile(spreads, 0.5) if comparable else None,
+            "p95": _percentile(spreads, 0.95) if comparable else None,
+            "maximum": max(spreads) if comparable else None,
         },
         "skew_ms": {
-            "median": _percentile(spreads, 0.5) * 1000 / sample_rate,
-            "p95": _percentile(spreads, 0.95) * 1000 / sample_rate,
-            "maximum": max(spreads, default=0) * 1000 / sample_rate,
+            "median": (
+                _percentile(spreads, 0.5) * 1000 / sample_rate
+                if comparable
+                else None
+            ),
+            "p95": (
+                _percentile(spreads, 0.95) * 1000 / sample_rate
+                if comparable
+                else None
+            ),
+            "maximum": max(spreads) * 1000 / sample_rate if comparable else None,
         },
         "stream_trends": stream_trends,
         "fault_maxima": fault_maxima,
@@ -201,7 +245,8 @@ def main() -> int:
         help="Log file to read; omit or use '-' for stdin",
     )
     parser.add_argument("--sample-rate", type=int, default=48_000)
-    parser.add_argument("--bucket-seconds", type=int, default=5)
+    parser.add_argument("--bucket-seconds", type=int, default=120)
+    parser.add_argument("--trend-threshold-ms", type=float, default=1.0)
     args = parser.parse_args()
 
     if args.log and args.log != "-":
@@ -212,6 +257,7 @@ def main() -> int:
         text,
         sample_rate=args.sample_rate,
         bucket_seconds=args.bucket_seconds,
+        trend_threshold_ms=args.trend_threshold_ms,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0

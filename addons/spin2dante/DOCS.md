@@ -197,22 +197,29 @@ stream session. `stream_start_us` is the first Sendspin audio timestamp seen in
 that session; records with the same nonzero value carry the same source
 timeline and can be compared.
 
-`timeline_offset_frames` is the median-filtered signed DANTE read-position
-error against the shared Sendspin/PTP prediction. Subtract the values from two
-records in the same reporting window to estimate their electronic playout
-skew. At 48 kHz, 48 frames = 1 ms. This is a direct current-timeline
-measurement; do not infer skew from the process-lifetime
-`drift_inserted_frames` and `drift_dropped_frames` counters.
+`playout_key_frames` is the median-filtered live value of
+`DANTE read position + configured prebuffer - Sendspin server time in frames`.
+It is independent of each bridge's scheduler anchor and retains constant
+anchor or `buffer_ms` differences. Subtract the values from two records in the
+same reporting window to estimate their electronic playout skew. At 48 kHz,
+48 frames = 1 ms.
+
+`drift_since_anchor_frames` is different: it is the error against that
+bridge's own scheduler anchor and drives gradual correction, but constant
+cross-bridge anchor offsets cancel out of it. Do not use it or the
+process-lifetime inserted/dropped counters as a substitute for the playout key.
 
 Example:
 
 ```text
 [sync] bridge_id=livingroom bridge_name="Living Room" ... session=1 \
-stream_start_us=1842000000 drift_valid=1 timeline_offset_frames=-72 \
-timeline_offset_us=-1500 raw_offset_frames=-65 anchor_correction_frames=174 ...
+stream_start_us=1842000000 playout_key_valid=1 playout_key_frames=43210 \
+drift_valid=1 drift_since_anchor_frames=-72 drift_since_anchor_us=-1500 \
+raw_drift_since_anchor_frames=-65 anchor_correction_frames=174 ...
 ```
 
-Use the bundled analyzer on saved App/container logs:
+From a checkout of this repository, use the analyzer on saved App/container
+logs (the analyzer is not included in the Home Assistant App image):
 
 ```bash
 python3 test/common/sync_log_analyzer.py spin2dante.log
@@ -221,7 +228,9 @@ python3 test/common/sync_log_analyzer.py spin2dante.log
 It reports maximum, median, and p95 pairwise skew; the two bridges at the
 maximum; whether each stream's spread is growing or reconverging; and maximum
 fault counters. Records from different `stream_start_us` values are never
-compared.
+compared. Its default 120-second, stream-relative windows tolerate normal
+per-process logging phase differences. No comparable records produce `null`
+skew fields rather than a misleading zero.
 
 INFO summaries default to every two minutes to preserve useful history on
 multi-bridge installations. Correction start/stop events remain immediate at
