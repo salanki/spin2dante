@@ -60,7 +60,7 @@ Because the scheduler writes a chunk to the ring only once its playout time is w
 
 ### Goal
 
-Multiple bridges connected to the same Sendspin server, sharing the same PTP clock, should place the same audio chunk at the same ring position. Target: < 1ms (48 samples) cross-bridge spread. Achieved: **< 0.5ms** (1-16 samples).
+Multiple bridges connected to the same Sendspin server, sharing the same PTP clock, should place the same audio chunk at nearly the same ring position. The sustained operational target is **< 2ms** (96 samples) cross-bridge spread, with < 1ms preferred in overlapping coverage areas. Controlled tests measured the initial anchor spread at **1-16 samples** (0.02-0.33ms); that initial-anchor result is not a guarantee that live pairwise skew remains below 0.33ms while independent drift-correction schedules are active.
 
 ### How it works
 
@@ -79,7 +79,7 @@ target = anchor_ring_pos + (chunk.timestamp - anchor_server_us) * SAMPLE_RATE / 
 
 This gives stable chunk-to-chunk spacing (unaffected by wall-clock jitter) and cross-bridge consistency (all bridges using the same anchor mapping place the same chunk at the same position).
 
-### ReadPositionSnapshot (the key to sub-millisecond sync)
+### ReadPositionSnapshot (the key to precise initial alignment)
 
 The critical insight: sampling `read_pos` and `server_now_us()` separately introduces a timing gap that causes cross-bridge anchor offset. With separate sampling, bridges that anchor at different wall-clock times get different mappings.
 
@@ -107,9 +107,13 @@ The initial sync_key metric (`ring_pos - server_us * rate / 1M`) confirms this
 anchor — it differs by only 1-16 samples across bridges. Drift corrections
 subsequently move each bridge's anchor independently. Bridges sharing the same
 PTP and Sendspin clocks should accrue corrections at the same average rate, but
-their instantaneous schedules can differ by a few frames. That is tens of
-microseconds at 48kHz and remains within the sub-millisecond sync budget; the
-initial sync_key is no longer an exact invariant after correction begins.
+their instantaneous schedules can differ and temporarily increase pairwise
+skew. The schedules should reconverge rather than diverge continuously. In one
+approximately ten-hour, two-zone production observation, a correction-counter
+proxy measured 0.875ms median, 1.08ms p95, 1.27ms recent maximum, and 1.75ms
+maximum earlier in the session. The initial sync_key is no longer an exact
+invariant after correction begins; use attributed `[sync]` records and the sync
+log analyzer to assess sustained playout skew.
 
 ### Chunk eligibility decisions
 
@@ -323,7 +327,7 @@ Per-chunk live targeting (`target = read_pos + prebuffer + delta_from_server_now
 
 ### Why ReadPositionSnapshot for sync
 
-Sampling `read_pos` and `server_now_us()` separately introduces a timing gap (microseconds to milliseconds). This gap differs per bridge, causing 30-50ms of cross-bridge anchor offset. The seqlock snapshot from the TX thread eliminates this gap, reducing offset to 1-16 samples (< 0.5ms).
+Sampling `read_pos` and `server_now_us()` separately introduces a timing gap (microseconds to milliseconds). This gap differs per bridge, causing 30-50ms of cross-bridge anchor offset. The seqlock snapshot from the TX thread eliminates this gap, reducing the measured initial anchor offset to 1-16 samples (< 0.5ms). Sustained playout skew can be larger once per-bridge drift corrections begin.
 
 ### TMPDIR must be on a shared volume
 

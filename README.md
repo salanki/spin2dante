@@ -9,7 +9,7 @@
 > **Note**
 > This project is experimental. It has been validated with real DANTE hardware
 > running as a Home Assistant add-on, and with Music Assistant grouped playback
-> across Sonos and DANTE players — the two stay in perfect audible sync.
+> across Sonos and DANTE players — the tested setup remained audibly synchronized.
 > Use at your own risk.
 
 Bridge [Sendspin](https://www.sendspin-audio.com/) audio streams to [DANTE](https://www.getdante.com/) network audio receivers.
@@ -34,8 +34,8 @@ DANTE Receivers (amplifiers, receivers, etc.)
 ### Key capabilities
 
 - **Unlimited zones** — run one bridge per zone, each appears as a separate DANTE transmitter and Music Assistant player. Tested with up to 16 simultaneous stereo pairs.
-- **Sub-millisecond cross-bridge sync** — bridges sharing the same PTP clock and Sendspin server synchronize to within 1-16 samples (0.02-0.33ms). Group playback across zones stays in tight sync without inter-bridge communication.
-- **Cross-ecosystem sync with Sonos** — validated with Music Assistant grouped playback spanning Sonos and DANTE players simultaneously; the two ecosystems stay in perfect audible sync.
+- **Tight cross-bridge sync** — controlled tests measured the initial anchor-mapping spread at 1-16 samples (0.02-0.33ms). During long-running playback, independent drift-correction schedules can temporarily increase pairwise skew; the operational target is under 2ms.
+- **Cross-ecosystem sync with Sonos** — validated with Music Assistant grouped playback spanning Sonos and DANTE players simultaneously; the tested setup remained audibly synchronized.
 - **Measured PCM integrity** — the E2E harness captures DANTE output, aligns it against a deterministic reference, verifies sample-level exact runs and match ratio, and attributes any declared single-frame timing corrections separately from corruption.
 
 ## Deployment Options
