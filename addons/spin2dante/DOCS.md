@@ -3,6 +3,24 @@
 This add-on runs one or more `spin2dante` bridge processes and advertises each
 configured stream as its own DANTE transmitter on your local network.
 
+## Reference Deployment
+
+The add-on is used continuously in a residential whole-house audio deployment
+with approximately 20 independent stereo zones. Music Assistant, Statime, and
+spin2dante run as Home Assistant apps inside a Home Assistant OS virtual
+machine, with one bridge process per DANTE zone.
+
+The reference deployment uses UniFi network infrastructure and DANTE-capable
+amplifiers and receivers from Blaze Audio, Origin Acoustics, and Wisdom Audio.
+All bridges share the same Sendspin timeline and DANTE PTP clock. Grouped
+playback is used across multiple DANTE zones and has also been tested in mixed
+Sonos/DANTE groups.
+
+This is an example of a validated real-hardware deployment, not a hardware or
+topology requirement. Controlled tests measured the initial anchor-mapping
+spread at 1-16 samples; long-running monitoring uses an operational pairwise
+skew target below 2ms.
+
 ## Requirements
 
 - A DANTE-capable receiver on the same L2 network

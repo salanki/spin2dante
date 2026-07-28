@@ -38,6 +38,24 @@ DANTE Receivers (amplifiers, receivers, etc.)
 - **Cross-ecosystem sync with Sonos** — validated with Music Assistant grouped playback spanning Sonos and DANTE players simultaneously; the tested setup remained audibly synchronized.
 - **Measured PCM integrity** — the E2E harness captures DANTE output, aligns it against a deterministic reference, verifies sample-level exact runs and match ratio, and attributes any declared single-frame timing corrections separately from corruption.
 
+### Reference production deployment
+
+spin2dante is used continuously in a residential whole-house audio system with
+approximately 20 independent stereo zones. Music Assistant, Statime, and
+spin2dante run as Home Assistant apps inside a Home Assistant OS virtual
+machine, with one spin2dante bridge process per DANTE zone.
+
+The deployment uses UniFi network infrastructure and feeds DANTE-capable
+amplifiers and receivers from Blaze Audio, Origin Acoustics, and Wisdom Audio.
+All bridges share the same Sendspin timeline and DANTE PTP clock. Grouped
+playback is used across multiple DANTE zones and has also been tested in mixed
+Sonos/DANTE groups.
+
+This deployment provides real-hardware operational validation, not a universal
+performance guarantee. Controlled tests measured the initial anchor-mapping
+spread at 1-16 samples; long-running monitoring uses an operational pairwise
+skew target below 2ms.
+
 ## Deployment Options
 
 spin2dante supports two deployment models:
