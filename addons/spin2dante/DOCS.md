@@ -16,6 +16,37 @@ All bridges share the same Sendspin timeline and DANTE PTP clock. Grouped
 playback is used across multiple DANTE zones and has also been tested in mixed
 Sonos/DANTE groups.
 
+```text
+Home Assistant OS VM
+┌─────────────────────────────────────────────────┐
+│ Music Assistant                                 │
+│       │ Sendspin                                 │
+│       ▼                                          │
+│ spin2dante — one bridge process per DANTE zone  │
+│       │ DANTE audio + PTP via dedicated NIC      │
+└───────┼─────────────────────────────────────────┘
+        ▼
+Main-rack UniFi switch
+├── Wisdom amplifier — elected PTP grandmaster
+├── DANTE receivers on the main rack
+└── UniFi inter-switch trunks
+    ├── Downstream UniFi switch ── DANTE receivers
+    ├── Downstream UniFi switch ── DANTE receivers
+    └── Downstream UniFi switch ── additional zones
+```
+
+DANTE audio and PTP remain on one Layer-2 DANTE network across the inter-switch
+trunks. This validates operation with receivers behind multiple switches, but
+does not imply that arbitrary multicast, QoS, VLAN, or switch configurations
+will work without appropriate setup.
+
+The Wisdom amplifier supplies the hardware PTP grandmaster. The Home Assistant
+VM follows it through Statime using software clock handling rather than a
+hardware-timestamped PTP path. Every bridge in this deployment uses
+`dante_latency: 10`, providing reasonable packet-jitter and scheduling headroom
+for the VM-based transmitter. This adds a common latency floor; it is not a
+10ms cross-zone synchronization error.
+
 This is an example of a validated real-hardware deployment, not a hardware or
 topology requirement. Controlled tests measured the initial anchor-mapping
 spread at 1-16 samples; long-running monitoring uses an operational pairwise
