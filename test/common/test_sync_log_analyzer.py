@@ -12,14 +12,18 @@ def sync_line(
     session=1,
     stale_drops=0,
     rebuffers=0,
+    drift=None,
+    prebuffer_frames=240,
 ):
+    drift = offset + prebuffer_frames if drift is None else drift
     return (
         f'[{timestamp} INFO  spin2dante::bridge] [sync] '
         f'bridge_id={bridge_id} bridge_name="{bridge_id} zone" '
         f"client_id=client-{bridge_id} session={session} "
         f"stream_start_us={stream_start_us} mode=scheduled "
-        f"drift_valid=1 drift_since_anchor_frames={offset} "
-        f"drift_since_anchor_us=0 raw_drift_since_anchor_frames={offset} "
+        f"drift_valid=1 playout_offset_frames={offset} playout_offset_us=0 "
+        f"prebuffer_frames={prebuffer_frames} drift_since_anchor_frames={drift} "
+        f"drift_since_anchor_us=0 raw_drift_since_anchor_frames={drift} "
         f"anchor_correction_frames=0 pending=0 "
         f"stale_drops={stale_drops} trims=0/0 high_water=1 "
         f"drift_corrections=0 drift_inserted_frames=0 "
@@ -28,6 +32,32 @@ def sync_line(
 
 
 class SyncLogAnalyzerTest(unittest.TestCase):
+
+    def test_buffer_ms_difference_is_visible_in_playout_offset(self):
+        """Equal scheduler drift, different buffer_ms: the zones really do play
+        buffer_ms apart, and the offset must show it (drift alone cannot)."""
+        lines = [
+            sync_line(
+                "2026-07-28T16:00:00Z", "livingroom", -240,
+                drift=0, prebuffer_frames=240,
+            ),
+            sync_line(
+                "2026-07-28T16:00:02Z", "pooldeck", -2_640,
+                drift=0, prebuffer_frames=2_640,
+            ),
+        ]
+
+        result = analyze_sync_logs("\n".join(lines))
+
+        self.assertEqual(result["comparable_samples"], 1)
+        self.assertEqual(result["skew_frames"]["maximum"], 2_400)
+        self.assertAlmostEqual(result["skew_ms"]["maximum"], 50.0)
+        self.assertEqual(
+            result["max_pairwise_skew"]["low_bridge_id"], "pooldeck"
+        )
+        self.assertEqual(
+            result["max_pairwise_skew"]["high_bridge_id"], "livingroom"
+        )
     def test_parser_handles_quoted_zone_name(self):
         record = parse_sync_line(
             sync_line("2026-07-28T16:00:00Z", "livingroom", -72)
@@ -35,7 +65,7 @@ class SyncLogAnalyzerTest(unittest.TestCase):
 
         self.assertEqual(record.bridge_id, "livingroom")
         self.assertEqual(record.bridge_name, "livingroom zone")
-        self.assertEqual(record.drift_since_anchor_frames, -72)
+        self.assertEqual(record.playout_offset_frames, -72)
 
     def test_reports_largest_pair_and_percentiles(self):
         lines = [

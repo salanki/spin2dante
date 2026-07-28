@@ -201,14 +201,20 @@ timeline and can be compared.
 against the bridge's scheduler mapping. That mapping pairs the globally shared
 DANTE/PTP read clock with Sendspin server time, and applied corrections move
 the anchor, so the metric retains both anchor-placement error and correction
-effects. Subtract simultaneous records from two bridges on the same stream to
-estimate electronic playout skew. At 48 kHz, 48 frames = 1 ms.
+effects. It is the input to the correction loop, and a healthy bridge holds it
+near zero.
 
-The metric excludes each bridge's own prebuffer, so it is directly comparable
-only between bridges configured with the same `buffer_ms`. `buffer_ms` is real
-playout delay (see Notes), and a difference in it does **not** appear in the
-subtraction — when comparing zones with different `buffer_ms`, subtract the
-configured buffer difference by hand as well.
+**`playout_offset_frames` is the number to compare between zones.** It is
+`drift_since_anchor_frames` minus that bridge's own prebuffer (`buffer_ms`,
+also logged as `prebuffer_frames`), which makes it the signed position of the
+audio at the DANTE read head on the shared Sendspin timeline. A healthy bridge
+sits at roughly `-prebuffer_frames`. Subtract simultaneous records from two
+bridges on the same stream to get their electronic playout skew. At 48 kHz,
+48 frames = 1 ms.
+
+Use the offset rather than the drift because `buffer_ms` is real playout delay
+(see Notes): two zones at `5` and `55` genuinely play 50 ms apart, and only the
+offset shows that — both report drift near zero.
 
 Do not infer current skew from process-lifetime inserted/dropped counters.
 
@@ -216,7 +222,8 @@ Example:
 
 ```text
 [sync] bridge_id=livingroom bridge_name="Living Room" ... session=1 \
-stream_start_us=1842000000 drift_valid=1 drift_since_anchor_frames=-72 \
+stream_start_us=1842000000 drift_valid=1 playout_offset_frames=-312 \
+playout_offset_us=-6500 prebuffer_frames=240 drift_since_anchor_frames=-72 \
 drift_since_anchor_us=-1500 \
 raw_drift_since_anchor_frames=-65 anchor_correction_frames=174 ...
 ```

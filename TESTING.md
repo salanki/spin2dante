@@ -152,7 +152,7 @@ comparator's exit status.
 The same target also tests `test/common/sync_log_analyzer.py`. This separate
 log analyzer consumes attributed `[sync]` records, groups only bridges with the
 same nonzero `stream_start_us`, and compares their current
-`drift_since_anchor_frames` values in stream-relative 120-second windows by
+`playout_offset_frames` values in stream-relative 120-second windows by
 default. Comparisons use the largest subset whose records span no more than 10
 seconds; stragglers are excluded and reported rather than invalidating the
 whole window. Its JSON output includes:

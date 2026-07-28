@@ -70,6 +70,22 @@ fn median_drift_sample(mut samples: [isize; 3]) -> isize {
     samples[1]
 }
 
+/// Signed position of the audio at the DANTE read head on the shared Sendspin
+/// server timeline, in frames. Negative means the bridge is playing that far
+/// behind server time, which is the intended steady state: a healthy bridge
+/// sits at roughly `-prebuffer_target`.
+///
+/// `drift_since_anchor` is measured against `expected_read_pos`, which
+/// subtracts `prebuffer_target`, while chunks are targeted at
+/// `anchor_ring_pos + (timestamp - anchor_us)` with no prebuffer term. The
+/// difference is exactly this bridge's own prebuffer, so drift alone reads ~0
+/// on two bridges whose `buffer_ms` differ even though they genuinely play
+/// `buffer_ms` apart. Removing the prebuffer yields a value that is directly
+/// comparable across bridges regardless of their configured buffer.
+fn playout_offset_frames(drift_since_anchor: isize, prebuffer_target: usize) -> i64 {
+    drift_since_anchor as i64 - prebuffer_target as i64
+}
+
 fn metrics_info_bucket(now: SystemTime, interval: Duration) -> u64 {
     now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() / interval.as_secs().max(1)
 }
@@ -1468,8 +1484,11 @@ impl SendspinBridge {
     fn sync_metrics_message(&self, mode: &str) -> String {
         let drift_error_us =
             self.last_drift_filtered_samples as i64 * 1_000_000 / SAMPLE_RATE as i64;
+        let playout_offset =
+            playout_offset_frames(self.last_drift_filtered_samples, self.prebuffer_target);
+        let playout_offset_us = playout_offset * 1_000_000 / SAMPLE_RATE as i64;
         format!(
-            "[sync] bridge_id={} bridge_name={:?} client_id={} session={} stream_start_us={} mode={} drift_valid={} drift_since_anchor_frames={} drift_since_anchor_us={} raw_drift_since_anchor_frames={} anchor_correction_frames={} pending={} stale_drops={} trims={}/{} high_water={} drift_corrections={} drift_inserted_frames={} drift_dropped_frames={} rebuffers={} drift_checks_skipped={}",
+            "[sync] bridge_id={} bridge_name={:?} client_id={} session={} stream_start_us={} mode={} drift_valid={} playout_offset_frames={} playout_offset_us={} prebuffer_frames={} drift_since_anchor_frames={} drift_since_anchor_us={} raw_drift_since_anchor_frames={} anchor_correction_frames={} pending={} stale_drops={} trims={}/{} high_water={} drift_corrections={} drift_inserted_frames={} drift_dropped_frames={} rebuffers={} drift_checks_skipped={}",
             self.bridge_id,
             self.device_name,
             self.client_id,
@@ -1477,6 +1496,9 @@ impl SendspinBridge {
             self.stream_start_us.unwrap_or(0),
             mode,
             u8::from(self.drift_sample_valid),
+            playout_offset,
+            playout_offset_us,
+            self.prebuffer_target,
             self.last_drift_filtered_samples,
             drift_error_us,
             self.last_drift_raw_samples,
@@ -1801,6 +1823,35 @@ mod tests {
         assert!(message.contains("drift_since_anchor_us=-1500"));
         assert!(message.contains("raw_drift_since_anchor_frames=-65"));
         assert!(message.contains("anchor_correction_frames=174"));
+        // buffer_ms 5 => 240 frames of prebuffer; -72 - 240 = -312.
+        assert!(message.contains("prebuffer_frames=240"));
+        assert!(message.contains("playout_offset_frames=-312"));
+        assert!(message.contains("playout_offset_us=-6500"));
+    }
+
+    #[test]
+    fn playout_offset_exposes_buffer_ms_differences_that_drift_hides() {
+        // Two bridges whose scheduler anchors are equally healthy (drift 0) but
+        // whose buffer_ms differ by 50ms genuinely play 50ms apart, because
+        // chunk targets carry no prebuffer term. drift_since_anchor cannot see
+        // that; the playout offset must.
+        let short_buffer = ms_to_samples(5);
+        let long_buffer = ms_to_samples(55);
+
+        assert_eq!(playout_offset_frames(0, short_buffer), -240);
+        assert_eq!(playout_offset_frames(0, long_buffer), -2_640);
+        assert_eq!(
+            playout_offset_frames(0, short_buffer) - playout_offset_frames(0, long_buffer),
+            ms_to_samples(50) as i64
+        );
+
+        // Anchor error and applied corrections still show up, and stay additive
+        // with the buffer term when both are present.
+        assert_eq!(playout_offset_frames(-240, short_buffer), -480);
+        assert_eq!(
+            playout_offset_frames(-240, long_buffer) - playout_offset_frames(0, short_buffer),
+            -240 - ms_to_samples(50) as i64
+        );
     }
 
     #[test]

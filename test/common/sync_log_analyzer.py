@@ -35,7 +35,7 @@ class SyncRecord:
     bridge_name: str
     session: int
     stream_start_us: int
-    drift_since_anchor_frames: int
+    playout_offset_frames: int
     fields: dict[str, str]
 
 
@@ -64,7 +64,7 @@ def parse_sync_line(line: str) -> SyncRecord | None:
         "session",
         "stream_start_us",
         "drift_valid",
-        "drift_since_anchor_frames",
+        "playout_offset_frames",
     )
     if (
         any(key not in fields for key in required)
@@ -78,7 +78,7 @@ def parse_sync_line(line: str) -> SyncRecord | None:
         bridge_name=fields.get("bridge_name", fields["bridge_id"]),
         session=int(fields["session"]),
         stream_start_us=int(fields["stream_start_us"]),
-        drift_since_anchor_frames=int(fields["drift_since_anchor_frames"]),
+        playout_offset_frames=int(fields["playout_offset_frames"]),
         fields=fields,
     )
 
@@ -194,14 +194,12 @@ def analyze_sync_logs(
         time_span_seconds = (max(timestamps) - min(timestamps)).total_seconds()
         ordered = sorted(
             coherent,
-            key=lambda record: record.drift_since_anchor_frames,
+            key=lambda record: record.playout_offset_frames,
         )
         compared_bridge_ids.update(record.bridge_id for record in ordered)
         low = ordered[0]
         high = ordered[-1]
-        spread = (
-            high.drift_since_anchor_frames - low.drift_since_anchor_frames
-        )
+        spread = high.playout_offset_frames - low.playout_offset_frames
         samples.append(
             {
                 "timestamp": max(record.timestamp for record in ordered).isoformat(),
@@ -217,10 +215,10 @@ def analyze_sync_logs(
                 "skew_us": spread * 1_000_000 / sample_rate,
                 "low_bridge_id": low.bridge_id,
                 "low_bridge_name": low.bridge_name,
-                "low_drift_since_anchor_frames": low.drift_since_anchor_frames,
+                "low_playout_offset_frames": low.playout_offset_frames,
                 "high_bridge_id": high.bridge_id,
                 "high_bridge_name": high.bridge_name,
-                "high_drift_since_anchor_frames": high.drift_since_anchor_frames,
+                "high_playout_offset_frames": high.playout_offset_frames,
             }
         )
 

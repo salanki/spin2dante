@@ -361,6 +361,7 @@ events are immediate.
 ```
 [sync] bridge_id=kitchen bridge_name="Kitchen" client_id=... session=1 \
 stream_start_us=1842000000 mode=scheduled drift_valid=1 \
+playout_offset_frames=-312 playout_offset_us=-6500 prebuffer_frames=240 \
 drift_since_anchor_frames=-72 \
 drift_since_anchor_us=-1500 raw_drift_since_anchor_frames=-65 \
 anchor_correction_frames=174 pending=0 stale_drops=0 trims=0/0 high_water=1 ...
@@ -373,7 +374,9 @@ anchor_correction_frames=174 pending=0 stale_drops=0 trims=0/0 high_water=1 ...
 | `stream_start_us` | First Sendspin audio timestamp; compare only equal nonzero values |
 | `mode` | `scheduled` (anchor-based targeting active) or `sequential` (fallback) |
 | `drift_valid` | `1` once the three-sample drift filter has a current result |
-| `drift_since_anchor_frames` | Filtered scheduler-output error; subtract simultaneous records from two bridges for pairwise playout skew (valid only when both use the same `buffer_ms` — the metric excludes each bridge's prebuffer) |
+| `playout_offset_frames` / `_us` | Signed position of the audio at the read head on the shared Sendspin timeline (`drift_since_anchor` minus `prebuffer_frames`); ≈ `-prebuffer_frames` when healthy. **Subtract simultaneous records from two bridges for pairwise playout skew.** |
+| `prebuffer_frames` | This bridge's `buffer_ms` in frames |
+| `drift_since_anchor_frames` | Filtered scheduler-output error, the correction loop's input; held near zero. Blind to `buffer_ms` differences, so do not use it for cross-bridge skew |
 | `drift_since_anchor_us` | The same per-anchor drift in microseconds |
 | `raw_drift_since_anchor_frames` | Latest unfiltered per-anchor drift |
 | `anchor_correction_frames` | Signed frame corrections applied to the current scheduler anchor |

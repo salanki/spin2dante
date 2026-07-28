@@ -150,10 +150,18 @@ stream sequence, the first Sendspin timestamp, and
 bridge's scheduler mapping. The anchor pairs the globally shared DANTE/PTP read
 clock with Sendspin server time, and every correction moves that anchor, so
 pairwise drift differences retain both anchor-placement error and applied
-corrections. It excludes each bridge's own prebuffer, so pairwise subtraction
-measures skew only between bridges configured with the same `buffer_ms`; a
-`buffer_ms` difference is real playout delay that the subtraction does not
-show. Lifetime correction-counter differences are not used as a substitute.
+corrections.
+
+`drift_since_anchor_frames` is measured against `expected_read_pos`, which
+subtracts `prebuffer_target`, while chunks are targeted at
+`anchor_ring_pos + (timestamp - anchor_us)` with no prebuffer term. The
+difference between the two is exactly the bridge's own prebuffer, so drift
+alone reads ~0 on two bridges whose `buffer_ms` differ even though they
+genuinely play `buffer_ms` apart. `playout_offset_frames` removes that term —
+it is the signed position of the audio at the read head on the shared server
+timeline, roughly `-prebuffer_target` when healthy — and is therefore the
+metric to subtract pairwise, whatever each bridge's buffer is set to. Lifetime
+correction-counter differences are not used as a substitute.
 
 The resulting stream is bit-perfect modulo these declared one-frame timing
 events. At 48kHz each event is 20.8 microseconds; corrections are distributed
