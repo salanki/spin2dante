@@ -192,7 +192,10 @@ Volume changes use a 20ms per-frame ramp to prevent audible clicks.
 
 ```
 new = 100 − 75 × log10(100 / old)      (old ≥ 7; round to nearest)
+new = 631 × (old / 100)^1.5            (old < 7; round to nearest)
 ```
+
+Why two formulas: the first inverts the taper's dB line, which only covers new volumes from 10% up. Old volumes below ~7 convert to values inside the fade-to-silence region below the 10% knee, where the second formula (inverting the fade) applies. Both agree at the crossover (old ≈ 6.3 → new = 10).
 
 | Old | New | Old | New |
 |----:|----:|----:|----:|

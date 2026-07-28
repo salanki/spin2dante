@@ -132,6 +132,15 @@ volume**, convert stored values to keep the same loudness:
 
 `new = 100 − 75 × log10(100 / old)` (for old ≥ 7; round to nearest)
 
+For old volumes below 7 (rare — these were barely audible on the old
+curve), the converted value lands in the fade-to-silence region below the
+new taper's 10% knee, so use this formula instead:
+
+`new = 631 × (old / 100)^1.5` (for old < 7; round to nearest)
+
+Both formulas agree at the crossover (old ≈ 6.3 → new = 10), and the
+table below already uses the correct branch for every row.
+
 | Old | New | Old | New |
 |----:|----:|----:|----:|
 | 100 | 100 | 40 | 70 |
