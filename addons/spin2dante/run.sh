@@ -9,6 +9,7 @@ SERVER_BUFFER_MS="$(bashio::config 'server_buffer_ms')"
 DRIFT_THRESHOLD_MS="$(bashio::config 'drift_threshold_ms')"
 DRIFT_CHECK_INTERVAL_MS="$(bashio::config 'drift_check_interval_ms')"
 MAX_CORRECTION_SAMPLES_PER_TICK="$(bashio::config 'max_correction_samples_per_tick')"
+SYNC_LOG_INTERVAL_SECONDS="$(bashio::config 'sync_log_interval_seconds')"
 OPTIONS_FILE=/data/options.json
 
 if [[ ! -f "$OPTIONS_FILE" ]]; then
@@ -159,12 +160,14 @@ for ((i = 0; i < BRIDGE_COUNT; i++)); do
     /usr/local/bin/spin2dante \
         --url "$url" \
         --name "$name" \
+        --bridge-id "$id" \
         --buffer-ms "$buffer_ms" \
         --server-buffer-ms "$server_buffer_ms" \
         --dante-latency "$dante_latency" \
         --drift-threshold-ms "$DRIFT_THRESHOLD_MS" \
         --drift-check-interval-ms "$DRIFT_CHECK_INTERVAL_MS" \
         --max-correction-samples-per-tick "$MAX_CORRECTION_SAMPLES_PER_TICK" \
+        --sync-log-interval-seconds "$SYNC_LOG_INTERVAL_SECONDS" \
         --volume-control "$volume_control" \
         "${extra_args[@]}" &
 

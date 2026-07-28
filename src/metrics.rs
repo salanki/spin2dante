@@ -1,4 +1,4 @@
-use log::info;
+use log::{debug, info};
 use std::time::Instant;
 
 /// Tracks bridge buffer metrics for console logging.
@@ -29,7 +29,7 @@ impl BufferMetrics {
         // No per-chunk tracking needed currently
     }
 
-    pub fn log(&mut self, write_pos: usize, read_pos: usize) {
+    pub fn log(&mut self, write_pos: usize, read_pos: usize, info_level: bool) {
         let fill = (write_pos as isize).wrapping_sub(read_pos as isize);
         let target = self.target_fill as isize;
 
@@ -59,12 +59,24 @@ impl BufferMetrics {
         };
 
         if read_pos > 0 {
+            if info_level {
+                info!(
+                    "[buffer] fill={} target={} drift={} write_pos={} read_pos={}",
+                    fill, self.target_fill, drift_str, write_pos, read_pos
+                );
+            } else {
+                debug!(
+                    "[buffer] fill={} target={} drift={} write_pos={} read_pos={}",
+                    fill, self.target_fill, drift_str, write_pos, read_pos
+                );
+            }
+        } else if info_level {
             info!(
-                "[buffer] fill={} target={} drift={} write_pos={} read_pos={}",
-                fill, self.target_fill, drift_str, write_pos, read_pos
+                "[buffer] writing at {} samples (read_pos not yet available)",
+                write_pos
             );
         } else {
-            info!(
+            debug!(
                 "[buffer] writing at {} samples (read_pos not yet available)",
                 write_pos
             );

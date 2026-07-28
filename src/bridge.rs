@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
 
@@ -31,7 +31,7 @@ pub const CHANNELS: usize = 2;
 // realignment guard are both keyed off the ring size. 16384 ≈ 341ms at 48kHz.
 pub const MIN_RING_BUFFER_SIZE: usize = 16384; // ~341ms at 48kHz, power of 2
 pub const SAMPLE_RATE: u32 = 48000;
-const METRICS_INTERVAL_SECS: u64 = 5;
+const METRICS_TICK_SECS: u64 = 5;
 const HOLE_FIX_WAIT: usize = 4800; // ~100ms at 48kHz
 
 // Absolute backstop on the pending-queue chunk count, independent of duration.
@@ -68,6 +68,14 @@ fn expected_read_pos(anchor_ring_pos: usize, prebuffer_target: usize, elapsed_us
 fn median_drift_sample(mut samples: [isize; 3]) -> isize {
     samples.sort_unstable();
     samples[1]
+}
+
+fn metrics_info_bucket(now: SystemTime, interval: Duration) -> u64 {
+    now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() / interval.as_secs().max(1)
+}
+
+fn metrics_info_due(last_bucket: Option<u64>, current_bucket: u64) -> bool {
+    last_bucket != Some(current_bucket)
 }
 
 // ─── Bridge state machine ───────────────────────────────────────────
@@ -193,6 +201,7 @@ impl CorrectionState {
 pub struct SendspinBridge {
     url: String,
     device_name: String,
+    bridge_id: String,
     client_id: String,
     buffer_ms: u32,
     // Advertised Sendspin buffer_capacity expressed in ms of audio (send-ahead
@@ -211,9 +220,15 @@ pub struct SendspinBridge {
     drift_threshold_samples: usize,
     drift_check_interval: Duration,
     max_correction_samples: usize,
+    sync_log_interval: Duration,
+    last_sync_info_bucket: Option<u64>,
+    last_waiting_info_bucket: Option<u64>,
     correction_planner: CorrectionPlanner,
     correction_state: CorrectionState,
     drift_history: VecDeque<isize>,
+    last_drift_raw_samples: isize,
+    last_drift_filtered_samples: isize,
+    drift_sample_valid: bool,
     state: BridgeState,
     // Device + TX state (persistent for process lifetime)
     rb_inputs: Option<Vec<RBInput<Sample, OwnedBuffer<Atomic<Sample>>>>>,
@@ -253,6 +268,14 @@ pub struct SendspinBridge {
     drift_dropped_frames: u64,
     rebuffers: u64,
     drift_checks_skipped: u64,
+    // Per-stream diagnostics. stream_seq increments for every accepted
+    // stream/start; stream_start_us is the first audio timestamp observed for
+    // that stream and can correlate bridges receiving the same source.
+    stream_seq: u64,
+    stream_start_us: Option<i64>,
+    // Signed correction applied to the current scheduler anchor. Unlike the
+    // process-lifetime counters above, this resets whenever the anchor resets.
+    anchor_correction_frames: i64,
     // Volume control
     gain_control: Option<GainControl>,
     gain_ramp: BridgeGainRamp,
@@ -270,12 +293,14 @@ impl SendspinBridge {
     pub fn new(
         url: String,
         device_name: String,
+        bridge_id: String,
         buffer_ms: u32,
         server_buffer_ms: u32,
         dante_latency_ns: u32,
         drift_threshold_ms: u32,
         drift_check_interval_ms: u64,
         max_correction_samples_per_tick: usize,
+        sync_log_interval_seconds: u64,
         client_id: String,
         volume_control: VolumeControlMode,
         state_file: Option<std::path::PathBuf>,
@@ -314,6 +339,7 @@ impl SendspinBridge {
         Self {
             url,
             device_name,
+            bridge_id,
             client_id,
             buffer_ms,
             server_buffer_ms,
@@ -323,9 +349,15 @@ impl SendspinBridge {
             drift_threshold_samples: ms_to_samples(drift_threshold_ms),
             drift_check_interval: Duration::from_millis(drift_check_interval_ms),
             max_correction_samples: max_correction_samples_per_tick,
+            sync_log_interval: Duration::from_secs(sync_log_interval_seconds),
+            last_sync_info_bucket: None,
+            last_waiting_info_bucket: None,
             correction_planner: CorrectionPlanner::new(),
             correction_state: CorrectionState::default(),
             drift_history: VecDeque::with_capacity(3),
+            last_drift_raw_samples: 0,
+            last_drift_filtered_samples: 0,
+            drift_sample_valid: false,
             state: BridgeState::Idle,
             rb_inputs: None,
             device_server: None,
@@ -355,6 +387,9 @@ impl SendspinBridge {
             drift_dropped_frames: 0,
             rebuffers: 0,
             drift_checks_skipped: 0,
+            stream_seq: 0,
+            stream_start_us: None,
+            anchor_correction_frames: 0,
             gain_control,
             gain_ramp,
             report_dante_subscriber,
@@ -542,7 +577,7 @@ impl SendspinBridge {
         self.queue_sync_state(ClientSyncState::ExternalSource);
 
         let mut metrics_interval =
-            tokio::time::interval(std::time::Duration::from_secs(METRICS_INTERVAL_SECS));
+            tokio::time::interval(std::time::Duration::from_secs(METRICS_TICK_SECS));
         let mut drift_interval = tokio::time::interval(self.drift_check_interval);
 
         loop {
@@ -626,6 +661,8 @@ impl SendspinBridge {
                         return;
                     }
 
+                    self.stream_seq = self.stream_seq.wrapping_add(1);
+                    self.stream_start_us = None;
                     self.queue_player_state();
 
                     if self.state == BridgeState::Running
@@ -765,6 +802,13 @@ impl SendspinBridge {
         self.scheduler_settled = false;
         self.correction_state.reset();
         self.drift_history.clear();
+        self.last_drift_raw_samples = 0;
+        self.last_drift_filtered_samples = 0;
+        self.drift_sample_valid = false;
+        self.anchor_correction_frames = 0;
+        // Preserve the INFO cadence across a rebuffer. The warning describing
+        // the fault is immediate; repeated scheduler resets must not restore
+        // five-second INFO volume. Track changes preserve the cadence too.
         self.gain_ramp.reset_to_current();
     }
 
@@ -798,6 +842,7 @@ impl SendspinBridge {
         let elapsed_us = server_now_us - anchor_us;
         let expected_read_pos = expected_read_pos(anchor_pos, self.prebuffer_target, elapsed_us);
         let raw_drift_samples = wrapsub(actual_read_pos, expected_read_pos);
+        self.last_drift_raw_samples = raw_drift_samples;
 
         // A ring-scale excursion means scheduler state is unsafe. Do not wait
         // for the median filter to fill before taking the rebuffer safety path.
@@ -828,7 +873,8 @@ impl SendspinBridge {
             self.drift_history[1],
             self.drift_history[2],
         ]);
-
+        self.last_drift_filtered_samples = drift_samples;
+        self.drift_sample_valid = true;
         if drift_samples.abs() > (self.ring_buffer_size / 4) as isize {
             warn!(
                 "drift anomaly: filtered={} raw={} samples actual_read_pos={} expected_read_pos={}, rebuffering",
@@ -889,14 +935,36 @@ impl SendspinBridge {
         }
 
         if schedule != self.correction_state.schedule {
-            info!(
-                "drift correction schedule: filtered={} raw={} samples error_us={} insert_every={} drop_every={}",
-                drift_samples,
-                raw_drift_samples,
-                planner_error_us,
-                schedule.insert_every_n_frames,
-                schedule.drop_every_n_frames,
-            );
+            let was_correcting = self.correction_state.schedule.is_correcting();
+            let will_correct = schedule.is_correcting();
+            if was_correcting == will_correct {
+                debug!(
+                    "drift correction schedule: bridge_id={} bridge_name={:?} session={} stream_start_us={} state=adjust filtered={} raw={} samples error_us={} insert_every={} drop_every={}",
+                    self.bridge_id,
+                    self.device_name,
+                    self.stream_seq,
+                    self.stream_start_us.unwrap_or(0),
+                    drift_samples,
+                    raw_drift_samples,
+                    planner_error_us,
+                    schedule.insert_every_n_frames,
+                    schedule.drop_every_n_frames,
+                );
+            } else {
+                info!(
+                    "drift correction schedule: bridge_id={} bridge_name={:?} session={} stream_start_us={} state={} filtered={} raw={} samples error_us={} insert_every={} drop_every={}",
+                    self.bridge_id,
+                    self.device_name,
+                    self.stream_seq,
+                    self.stream_start_us.unwrap_or(0),
+                    if will_correct { "start" } else { "stop" },
+                    drift_samples,
+                    raw_drift_samples,
+                    planner_error_us,
+                    schedule.insert_every_n_frames,
+                    schedule.drop_every_n_frames,
+                );
+            }
             self.correction_state.set_schedule(schedule);
         }
     }
@@ -1023,6 +1091,9 @@ impl SendspinBridge {
 
         if self.state == BridgeState::Idle {
             return;
+        }
+        if self.stream_start_us.is_none() {
+            self.stream_start_us = Some(chunk.timestamp);
         }
 
         // Decode PCM samples per channel
@@ -1278,6 +1349,7 @@ impl SendspinBridge {
             if net_correction != 0 {
                 anchor_pos = anchor_pos.wrapping_add_signed(net_correction);
                 self.anchor_ring_pos = Some(anchor_pos);
+                self.anchor_correction_frames += net_correction as i64;
                 self.drift_corrections += net_correction.unsigned_abs() as u64;
                 self.drift_inserted_frames += inserted as u64;
                 self.drift_dropped_frames += dropped as u64;
@@ -1346,7 +1418,8 @@ impl SendspinBridge {
 
     fn write_samples_at(&mut self, channel_samples: &mut [Vec<Sample>], frames: usize, pos: usize) {
         if let Some(gc) = &self.gain_control {
-            self.gain_ramp.apply(channel_samples, frames, gain_target(gc));
+            self.gain_ramp
+                .apply(channel_samples, frames, gain_target(gc));
         }
         if let Some(inputs) = &mut self.rb_inputs {
             for (ch, samples) in channel_samples.iter().enumerate() {
@@ -1392,33 +1465,66 @@ impl SendspinBridge {
 
     // ─── Metrics ────────────────────────────────────────────────────
 
+    fn sync_metrics_message(&self, mode: &str) -> String {
+        let drift_error_us =
+            self.last_drift_filtered_samples as i64 * 1_000_000 / SAMPLE_RATE as i64;
+        format!(
+            "[sync] bridge_id={} bridge_name={:?} client_id={} session={} stream_start_us={} mode={} drift_valid={} drift_since_anchor_frames={} drift_since_anchor_us={} raw_drift_since_anchor_frames={} anchor_correction_frames={} pending={} stale_drops={} trims={}/{} high_water={} drift_corrections={} drift_inserted_frames={} drift_dropped_frames={} rebuffers={} drift_checks_skipped={}",
+            self.bridge_id,
+            self.device_name,
+            self.client_id,
+            self.stream_seq,
+            self.stream_start_us.unwrap_or(0),
+            mode,
+            u8::from(self.drift_sample_valid),
+            self.last_drift_filtered_samples,
+            drift_error_us,
+            self.last_drift_raw_samples,
+            self.anchor_correction_frames,
+            self.pending_chunks.len(),
+            self.stale_drops,
+            self.trimmed_chunks,
+            self.trimmed_frames,
+            self.queued_high_water,
+            self.drift_corrections,
+            self.drift_inserted_frames,
+            self.drift_dropped_frames,
+            self.rebuffers,
+            self.drift_checks_skipped,
+        )
+    }
+
     fn log_metrics(&mut self) {
         match self.state {
             BridgeState::Idle => {}
             BridgeState::WaitingForSubscriber => {
-                info!("[buffer] waiting for DANTE subscriber");
+                let bucket = metrics_info_bucket(SystemTime::now(), self.sync_log_interval);
+                if metrics_info_due(self.last_waiting_info_bucket, bucket) {
+                    self.last_waiting_info_bucket = Some(bucket);
+                    info!("[buffer] waiting for DANTE subscriber");
+                } else {
+                    debug!("[buffer] waiting for DANTE subscriber");
+                }
             }
             BridgeState::Running => {
+                let bucket = metrics_info_bucket(SystemTime::now(), self.sync_log_interval);
+                let info_level = metrics_info_due(self.last_sync_info_bucket, bucket);
+                if info_level {
+                    self.last_sync_info_bucket = Some(bucket);
+                }
                 let mode = if self.anchor_server_us.is_some() {
                     "scheduled"
                 } else {
                     "sequential"
                 };
-                info!(
-                    "[sync] mode={} pending={} stale_drops={} trims={}/{} high_water={} drift_corrections={} drift_inserted_frames={} drift_dropped_frames={} rebuffers={} drift_checks_skipped={}",
-                    mode,
-                    self.pending_chunks.len(),
-                    self.stale_drops,
-                    self.trimmed_chunks,
-                    self.trimmed_frames,
-                    self.queued_high_water,
-                    self.drift_corrections,
-                    self.drift_inserted_frames,
-                    self.drift_dropped_frames,
-                    self.rebuffers,
-                    self.drift_checks_skipped,
-                );
-                self.metrics.log(self.write_pos, self.get_read_pos());
+                let message = self.sync_metrics_message(mode);
+                if info_level {
+                    info!("{message}");
+                } else {
+                    debug!("{message}");
+                }
+                self.metrics
+                    .log(self.write_pos, self.get_read_pos(), info_level);
             }
             _ => {}
         }
@@ -1600,12 +1706,14 @@ mod tests {
         let mut bridge = SendspinBridge::new(
             "ws://unused".to_string(),
             "test".to_string(),
+            "test".to_string(),
             5,
             2_000,
             1_000_000,
             5,
             1_000,
             48,
+            120,
             "test-client".to_string(),
             VolumeControlMode::None,
             None,
@@ -1639,8 +1747,60 @@ mod tests {
 
         assert!(bridge.pending_chunks.is_empty());
         assert_eq!(bridge.drift_inserted_frames, 2);
+        assert_eq!(bridge.anchor_correction_frames, 2);
         assert_eq!(bridge.anchor_ring_pos, Some(anchor_pos + 2));
         assert_eq!(bridge.write_pos, anchor_pos + 2 * chunk_frames + 2);
+    }
+
+    #[test]
+    fn info_metrics_are_immediate_then_rate_limited() {
+        let interval = Duration::from_secs(120);
+        let first = metrics_info_bucket(UNIX_EPOCH + Duration::from_secs(121), interval);
+        let second = metrics_info_bucket(UNIX_EPOCH + Duration::from_secs(239), interval);
+        let third = metrics_info_bucket(UNIX_EPOCH + Duration::from_secs(240), interval);
+
+        assert_eq!(first, second);
+        assert_ne!(second, third);
+        assert!(metrics_info_due(None, first));
+        assert!(!metrics_info_due(Some(first), second));
+        assert!(metrics_info_due(Some(second), third));
+    }
+
+    #[test]
+    fn sync_metrics_include_attribution_and_anchor_drift() {
+        let mut bridge = SendspinBridge::new(
+            "ws://unused".to_string(),
+            "Living Room".to_string(),
+            "livingroom".to_string(),
+            5,
+            500,
+            10_000_000,
+            2,
+            250,
+            12,
+            120,
+            "spin2dante-livingroom".to_string(),
+            VolumeControlMode::None,
+            None,
+            false,
+        );
+        bridge.stream_seq = 3;
+        bridge.stream_start_us = Some(1_842_000_000);
+        bridge.drift_sample_valid = true;
+        bridge.last_drift_filtered_samples = -72;
+        bridge.last_drift_raw_samples = -65;
+        bridge.anchor_correction_frames = 174;
+
+        let message = bridge.sync_metrics_message("scheduled");
+
+        assert!(message.contains("bridge_id=livingroom"));
+        assert!(message.contains("bridge_name=\"Living Room\""));
+        assert!(message.contains("session=3"));
+        assert!(message.contains("stream_start_us=1842000000"));
+        assert!(message.contains("drift_since_anchor_frames=-72"));
+        assert!(message.contains("drift_since_anchor_us=-1500"));
+        assert!(message.contains("raw_drift_since_anchor_frames=-65"));
+        assert!(message.contains("anchor_correction_frames=174"));
     }
 
     #[test]
@@ -1648,12 +1808,14 @@ mod tests {
         let mut bridge = SendspinBridge::new(
             "ws://unused".to_string(),
             "test".to_string(),
+            "test".to_string(),
             5,
             2_000,
             1_000_000,
             5,
             1_000,
             48,
+            120,
             "test-client".to_string(),
             VolumeControlMode::Bridge,
             None,

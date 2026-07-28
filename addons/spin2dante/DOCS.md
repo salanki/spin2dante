@@ -27,6 +27,7 @@ Use the companion `statime` add-on first. The intended setup is:
 - `drift_threshold_ms`: Drift threshold in milliseconds before gradual single-frame correction begins
 - `drift_check_interval_ms`: How often, in milliseconds, to sample drift between the Sendspin and PTP timelines
 - `max_correction_samples_per_tick`: Maximum single-frame repeat/drop budget per drift-check interval. Set to `0` to disable correction.
+- `sync_log_interval_seconds`: Seconds between attributed INFO-level sync summaries. Default: `120`. Five-second detail remains available at `debug`.
 - `bridges`: List of bridge definitions
 
 Each bridge entry contains:
@@ -61,6 +62,7 @@ dante_bind: auto
 drift_threshold_ms: 5
 drift_check_interval_ms: 1000
 max_correction_samples_per_tick: 48
+sync_log_interval_seconds: 120
 bridges:
   - id: kitchen
     name: Kitchen
@@ -178,6 +180,7 @@ Defaults:
 - `drift_threshold_ms: 5`
 - `drift_check_interval_ms: 1000`
 - `max_correction_samples_per_tick: 48`
+- `sync_log_interval_seconds: 120`
 
 The default budget allows at most 48 one-frame events per interval. Each event
 is 20.8 microseconds at 48kHz, and the planner spreads them over time. Set the
@@ -186,6 +189,63 @@ reanchor requests still fall back to a full rebuffer.
 
 PCM remains bit-exact except for these logged single-frame repeats/drops (and
 software gain when bridge-side volume is enabled below 100%).
+
+### Sync diagnostics
+
+Every INFO-level `[sync]` record identifies its bridge and current local
+stream session. `stream_start_us` is the first Sendspin audio timestamp seen in
+that session; records with the same nonzero value carry the same source
+timeline and can be compared.
+
+`drift_since_anchor_frames` is the median-filtered DANTE read-position error
+against the bridge's scheduler mapping. That mapping pairs the globally shared
+DANTE/PTP read clock with Sendspin server time, and applied corrections move
+the anchor, so the metric retains both anchor-placement error and correction
+effects. The configured prebuffer cancels from the result. Subtract
+simultaneous records from two bridges on the same stream to estimate electronic
+playout skew. At 48 kHz, 48 frames = 1 ms.
+
+Do not infer current skew from process-lifetime inserted/dropped counters.
+
+Example:
+
+```text
+[sync] bridge_id=livingroom bridge_name="Living Room" ... session=1 \
+stream_start_us=1842000000 drift_valid=1 drift_since_anchor_frames=-72 \
+drift_since_anchor_us=-1500 \
+raw_drift_since_anchor_frames=-65 anchor_correction_frames=174 ...
+```
+
+From a checkout of this repository, use the analyzer on saved App/container
+logs (the analyzer is not included in the Home Assistant App image):
+
+```bash
+python3 test/common/sync_log_analyzer.py spin2dante.log
+```
+
+It reports maximum, median, and p95 pairwise skew; the two bridges at the
+maximum; whether each stream's spread is growing or reconverging; and maximum
+fault counters. Records from different `stream_start_us` values are never
+compared. Its default 120-second, stream-relative windows tolerate normal
+per-process logging phase differences, but records more than 10 seconds apart
+are not treated as simultaneous. The analyzer keeps the largest coherent
+subset, reports excluded bridges as paired ID/name objects and aggregate
+counts, and only rejects the entire window when no valid pair remains.
+`bridges_never_compared` calls out every valid zone that never participated in
+a comparison, including a persistently late zone or one that reconnected with
+a different `stream_start_us`, so a clean subset maximum cannot be mistaken for
+all-zone health. No comparable records produce `null` skew fields rather than a
+misleading zero. Output also distinguishes all seen records from valid and
+skipped records. Window origins come from the earliest record available for
+each stream, so rotated or truncated inputs can shift window boundaries; the
+time-gap guard remains authoritative.
+
+INFO summaries default to every two minutes to preserve useful history on
+multi-bridge installations. Processes use shared wall-clock slots so periodic
+records are emitted close enough together for comparison; track changes and
+rebuffers preserve the cadence. Correction start/stop events remain immediate
+at INFO; cadence-only adjustments and five-second sync/buffer snapshots are
+DEBUG-level. Warnings and errors are never rate-limited.
 
 ## Notes
 

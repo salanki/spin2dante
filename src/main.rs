@@ -81,6 +81,13 @@ struct Args {
     #[arg(long, short, default_value = "Sendspin Bridge")]
     name: String,
 
+    /// Stable bridge identifier included in diagnostic log records.
+    ///
+    /// Home Assistant Apps should pass the bridge object's `id`. When omitted,
+    /// the Sendspin client ID is used so every record remains attributable.
+    #[arg(long)]
+    bridge_id: Option<String>,
+
     /// Playout buffer / latency in milliseconds.
     ///
     /// Larger values improve jitter tolerance, but they also delay audio by
@@ -118,6 +125,11 @@ struct Args {
     /// Maximum single-frame insert/drop corrections per drift-check interval; 0 disables correction.
     #[arg(long, default_value_t = 48)]
     max_correction_samples_per_tick: usize,
+
+    /// Period between INFO-level sync summaries. Five-second detail remains
+    /// available at DEBUG level.
+    #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u64).range(5..=3600))]
+    sync_log_interval_seconds: u64,
 
     /// Stable Sendspin client ID. If omitted, derived from name (+ INFERNO_PROCESS_ID if set).
     #[arg(long)]
@@ -190,8 +202,13 @@ async fn async_main() {
         None
     };
 
+    let client_id = args
+        .client_id
+        .unwrap_or_else(|| derive_client_id(&args.name));
+    let bridge_id = args.bridge_id.unwrap_or_else(|| client_id.clone());
     info!(
-        "spin2dante starting: url={} name={} buffer={}ms server_buffer={}ms dante_latency={} drift_threshold={}ms drift_check_interval={}ms max_correction={}samples volume_control={:?} state_file={:?} report_dante_subscriber={}",
+        "spin2dante starting: bridge_id={} url={} name={} buffer={}ms server_buffer={}ms dante_latency={} drift_threshold={}ms drift_check_interval={}ms max_correction={}samples sync_log_interval={}s volume_control={:?} state_file={:?} report_dante_subscriber={}",
+        bridge_id,
         args.url,
         args.name,
         args.buffer_ms,
@@ -200,25 +217,24 @@ async fn async_main() {
         args.drift_threshold_ms,
         args.drift_check_interval_ms,
         args.max_correction_samples_per_tick,
+        args.sync_log_interval_seconds,
         args.volume_control,
         state_file,
         args.report_dante_subscriber,
     );
-
-    let client_id = args
-        .client_id
-        .unwrap_or_else(|| derive_client_id(&args.name));
     info!("using Sendspin client_id={}", client_id);
 
     let mut bridge = bridge::SendspinBridge::new(
         args.url,
         args.name,
+        bridge_id,
         args.buffer_ms,
         args.server_buffer_ms,
         args.dante_latency.as_ns(),
         args.drift_threshold_ms,
         args.drift_check_interval_ms,
         args.max_correction_samples_per_tick,
+        args.sync_log_interval_seconds,
         client_id,
         args.volume_control,
         state_file,

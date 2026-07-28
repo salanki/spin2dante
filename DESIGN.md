@@ -143,8 +143,15 @@ planner cadence. `CorrectionState` carries that schedule across pending chunks:
 Each applied correction changes `anchor_ring_pos` by the same signed one-frame
 amount during the current drain pass. This keeps later queued targets
 contiguous. Cumulative inserted and dropped frame counts are emitted in the
-five-second `[sync]` metric and are reconciled with capture analysis in the
-deterministic drift test.
+periodic `[sync]` metric and are reconciled with capture analysis in the
+deterministic drift test. The same record includes bridge attribution, a local
+stream sequence, the first Sendspin timestamp, and
+`drift_since_anchor_frames`: the filtered read-position error against that
+bridge's scheduler mapping. The anchor pairs the globally shared DANTE/PTP read
+clock with Sendspin server time, and every correction moves that anchor, so
+pairwise drift differences retain both anchor-placement error and applied
+corrections. The configured prebuffer cancels from this output metric.
+Lifetime correction-counter differences are not used as a substitute.
 
 The resulting stream is bit-perfect modulo these declared one-frame timing
 events. At 48kHz each event is 20.8 microseconds; corrections are distributed
