@@ -228,12 +228,13 @@ maximum; whether each stream's spread is growing or reconverging; and maximum
 fault counters. Records from different `stream_start_us` values are never
 compared. Its default 120-second, stream-relative windows tolerate normal
 per-process logging phase differences, but records more than 10 seconds apart
-are rejected rather than treated as simultaneous. No comparable records
-produce `null` skew fields rather than a misleading zero. Output also
-distinguishes all seen records from valid and skipped records. Window origins
-come from the earliest record available for each stream, so rotated or
-truncated inputs can shift window boundaries; the time-gap guard remains
-authoritative.
+are not treated as simultaneous. The analyzer keeps the largest coherent
+subset, reports excluded bridge IDs/counts, and only rejects the entire window
+when no valid pair remains. No comparable records produce `null` skew fields
+rather than a misleading zero. Output also distinguishes all seen records from
+valid and skipped records. Window origins come from the earliest record
+available for each stream, so rotated or truncated inputs can shift window
+boundaries; the time-gap guard remains authoritative.
 
 INFO summaries default to every two minutes to preserve useful history on
 multi-bridge installations. Processes use shared wall-clock slots so periodic

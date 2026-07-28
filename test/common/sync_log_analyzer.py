@@ -98,6 +98,28 @@ def _percentile(values: list[int], percentile: float) -> float:
     return ordered[lower] * (1 - weight) + ordered[upper] * weight
 
 
+def _largest_time_coherent_subset(
+    records: list[SyncRecord],
+    max_gap_seconds: float,
+) -> list[SyncRecord]:
+    ordered = sorted(records, key=lambda record: record.timestamp)
+    best: list[SyncRecord] = []
+    left = 0
+    for right, record in enumerate(ordered):
+        while (
+            left < right
+            and (record.timestamp - ordered[left].timestamp).total_seconds()
+            > max_gap_seconds
+        ):
+            left += 1
+        candidate = ordered[left : right + 1]
+        # On equal-size windows, prefer the later one. It is more likely to be
+        # the epoch-aligned periodic set rather than immediate startup records.
+        if len(candidate) >= len(best):
+            best = candidate
+    return best
+
+
 def analyze_sync_logs(
     text: str,
     *,
@@ -140,16 +162,36 @@ def analyze_sync_logs(
 
     samples = []
     rejected_time_gap_buckets = 0
+    partial_time_gap_buckets = 0
+    excluded_bridge_counts: dict[str, int] = {}
     for (stream_start_us, _), by_bridge in sorted(buckets.items()):
         if len(by_bridge) < 2:
             continue
-        timestamps = [record.timestamp for record in by_bridge.values()]
-        time_span_seconds = (max(timestamps) - min(timestamps)).total_seconds()
-        if time_span_seconds > max_pair_time_gap_seconds:
+        coherent = _largest_time_coherent_subset(
+            list(by_bridge.values()),
+            max_pair_time_gap_seconds,
+        )
+        if len(coherent) < 2:
             rejected_time_gap_buckets += 1
             continue
+
+        coherent_ids = {record.bridge_id for record in coherent}
+        excluded = [
+            record
+            for record in by_bridge.values()
+            if record.bridge_id not in coherent_ids
+        ]
+        if excluded:
+            partial_time_gap_buckets += 1
+            for record in excluded:
+                excluded_bridge_counts[record.bridge_id] = (
+                    excluded_bridge_counts.get(record.bridge_id, 0) + 1
+                )
+
+        timestamps = [record.timestamp for record in coherent]
+        time_span_seconds = (max(timestamps) - min(timestamps)).total_seconds()
         ordered = sorted(
-            by_bridge.values(),
+            coherent,
             key=lambda record: record.drift_since_anchor_frames,
         )
         low = ordered[0]
@@ -163,6 +205,13 @@ def analyze_sync_logs(
                 "time_span_seconds": time_span_seconds,
                 "stream_start_us": stream_start_us,
                 "bridge_count": len(ordered),
+                "observed_bridge_count": len(by_bridge),
+                "excluded_bridge_ids": sorted(
+                    record.bridge_id for record in excluded
+                ),
+                "excluded_bridge_names": sorted(
+                    record.bridge_name for record in excluded
+                ),
                 "skew_frames": spread,
                 "skew_us": spread * 1_000_000 / sample_rate,
                 "low_bridge_id": low.bridge_id,
@@ -228,6 +277,9 @@ def analyze_sync_logs(
         "skipped_sync_records": skipped_sync_records,
         "comparable_samples": len(samples),
         "rejected_time_gap_buckets": rejected_time_gap_buckets,
+        "partial_time_gap_buckets": partial_time_gap_buckets,
+        "excluded_bridge_records": sum(excluded_bridge_counts.values()),
+        "excluded_bridge_counts": excluded_bridge_counts,
         "sample_rate": sample_rate,
         "bucket_seconds": bucket_seconds,
         "max_pair_time_gap_seconds": max_pair_time_gap_seconds,

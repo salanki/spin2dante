@@ -134,6 +134,27 @@ class SyncLogAnalyzerTest(unittest.TestCase):
         self.assertEqual(result["rejected_time_gap_buckets"], 1)
         self.assertIsNone(result["skew_ms"]["maximum"])
 
+    def test_keeps_valid_subset_when_one_bridge_is_a_straggler(self):
+        lines = [
+            sync_line("2026-07-28T16:00:00Z", "livingroom", -48),
+            sync_line("2026-07-28T16:00:02Z", "office", 48),
+            sync_line("2026-07-28T16:01:53Z", "pooldeck", 1_130),
+        ]
+
+        result = analyze_sync_logs("\n".join(lines))
+
+        self.assertEqual(result["comparable_samples"], 1)
+        self.assertEqual(result["rejected_time_gap_buckets"], 0)
+        self.assertEqual(result["partial_time_gap_buckets"], 1)
+        self.assertEqual(result["excluded_bridge_records"], 1)
+        self.assertEqual(result["excluded_bridge_counts"], {"pooldeck": 1})
+        self.assertEqual(result["skew_ms"]["maximum"], 2.0)
+        self.assertEqual(
+            result["max_pairwise_skew"]["excluded_bridge_ids"], ["pooldeck"]
+        )
+        self.assertEqual(result["max_pairwise_skew"]["bridge_count"], 2)
+        self.assertEqual(result["max_pairwise_skew"]["observed_bridge_count"], 3)
+
     def test_counts_invalid_sync_records_separately(self):
         valid = sync_line("2026-07-28T16:00:00Z", "livingroom", -72)
         invalid = sync_line("2026-07-28T16:00:05Z", "office", -70).replace(

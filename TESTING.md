@@ -153,15 +153,17 @@ The same target also tests `test/common/sync_log_analyzer.py`. This separate
 log analyzer consumes attributed `[sync]` records, groups only bridges with the
 same nonzero `stream_start_us`, and compares their current
 `drift_since_anchor_frames` values in stream-relative 120-second windows by
-default. Records more than 10 seconds apart are rejected. Its JSON output
-includes:
+default. Comparisons use the largest subset whose records span no more than 10
+seconds; stragglers are excluded and reported rather than invalidating the
+whole window. Its JSON output includes:
 
 - the maximum pairwise skew and affected bridge IDs/names;
 - median and p95 skew in frames and milliseconds;
 - per-stream growing/stable/reconverging classification using first/last-third
   medians and a 1 ms threshold;
 - maximum queue/drop/trim/rebuffer/skipped-check counters.
-- total, valid, and skipped sync-record counts plus rejected time-gap windows.
+- total, valid, and skipped sync-record counts, fully rejected windows, partial
+  windows, and excluded bridge IDs/counts.
 
 Run it against a saved log with:
 

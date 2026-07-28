@@ -388,7 +388,9 @@ and p95 pairwise skew, identify the affected bridge pair, and distinguish a
 growing gap from reconvergence. The analyzer will not compare different
 `stream_start_us` values and reports `null`, not zero, when there is no
 comparable data. Records more than 10 seconds apart are rejected rather than
-treated as simultaneous.
+treated as simultaneous. If one bridge is a straggler, the analyzer keeps the
+largest coherent subset and reports the excluded bridge IDs instead of
+discarding every other zone.
 
 **Buffer status** (ring buffer fill level):
 ```
