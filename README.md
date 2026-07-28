@@ -58,7 +58,7 @@ Home Assistant OS VM
 │       │ Sendspin                                 │
 │       ▼                                          │
 │ spin2dante — one bridge process per DANTE zone  │
-│       │ DANTE audio + PTP via dedicated NIC      │
+│       │ DANTE + PTP via PCI-passthrough NIC      │
 └───────┼─────────────────────────────────────────┘
         ▼
 Main-rack UniFi switch
@@ -74,6 +74,11 @@ DANTE audio and PTP remain on one Layer-2 DANTE network across the inter-switch
 trunks. This validates operation with receivers behind multiple switches, but
 does not imply that arbitrary multicast, QoS, VLAN, or switch configurations
 will work without appropriate setup.
+
+The Home Assistant OS VM runs on pinned CPU cores and receives a dedicated
+DANTE NIC through PCI passthrough, reducing host-scheduler and virtualized
+network variability. These are characteristics of the validated deployment,
+not strict requirements for spin2dante.
 
 The Wisdom amplifier supplies the hardware PTP grandmaster. The Home Assistant
 VM follows it through Statime using software clock handling rather than a
