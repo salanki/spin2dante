@@ -445,10 +445,38 @@ impl SendspinBridge {
                 .unwrap() = (*name).to_string();
         }
 
+        // Log the address inferno_aoip actually bound to. Everything DANTE-facing
+        // hangs off it: the mDNS responder only answers on that interface and
+        // publishes it as the A record, the ARC/CMC/flows sockets bind to it, and
+        // the factory device ID embeds it (bytes 2..6). If auto-detection picks a
+        // link-local or loopback address, Dante Controller never sees the device —
+        // and without this line the only trace is the state directory name.
+        let dante_ip = settings.self_info.ip_address;
+        let device_id = settings
+            .self_info
+            .factory_device_id
+            .iter()
+            .fold(String::with_capacity(16), |mut s, b| {
+                use std::fmt::Write;
+                let _ = write!(s, "{b:02x}");
+                s
+            });
+        let bind_source = match std::env::var("INFERNO_BIND_IP") {
+            Ok(v) if !v.is_empty() => format!("INFERNO_BIND_IP={v}"),
+            _ => "auto-detected".to_string(),
+        };
         info!(
-            "starting DANTE device: {} (waiting for PTP clock...)",
-            self.device_name
+            "starting DANTE device: {} dante_ip={} ({}) device_id={} (waiting for PTP clock...)",
+            self.device_name, dante_ip, bind_source, device_id
         );
+        if dante_ip.is_link_local() || dante_ip.is_loopback() || dante_ip.is_unspecified() {
+            warn!(
+                "DANTE IP {dante_ip} is a link-local/loopback address — Dante Controller \
+                 will not discover or reach this device unless your DANTE network really \
+                 runs on that range. Set INFERNO_BIND_IP to the name or IPv4 address of \
+                 your DANTE-facing interface, and check the container has host networking."
+            );
+        }
         let mut server = DeviceServer::start(settings).await;
         info!("DANTE device started, clock ready");
 

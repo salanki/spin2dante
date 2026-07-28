@@ -220,7 +220,7 @@ These are passed through to [inferno_aoip](https://gitlab.com/lumifaza/inferno):
 | `INFERNO_PROCESS_ID` | For multiple bridges | Unique ID (0-65535) per bridge on the same host |
 | `INFERNO_ALT_PORT` | For multiple bridges | Base UDP port, spaced 10 apart per bridge |
 | `INFERNO_SAMPLE_RATE` | No (default: 48000) | Sample rate in Hz |
-| `INFERNO_BIND_IP` | No | Network interface or IP to bind to |
+| `INFERNO_BIND_IP` | Recommended | DANTE-facing interface name or IPv4 address. Without it, inferno auto-detects and may pick a docker bridge or link-local address, leaving the device invisible to Dante Controller. Use the same interface as `PTP_INTERFACE`. |
 | `TMPDIR` | Yes | Must be on a shared volume (see deployment section) |
 
 ## Deployment
@@ -273,6 +273,17 @@ Inferno communicates with Statime via [usrvclock](https://gitlab.com/lumifaza/us
 Since Docker containers have isolated filesystems (even with host networking), the socket files must be on a **shared volume** visible to all containers. And each bridge needs its **own subdirectory** because all containers typically run their main process as PID 1, which would cause socket name collisions in a shared directory.
 
 ### Verifying the Deployment
+
+**Check each bridge bound to the right interface** — this is the most common
+deployment fault. Every DANTE-facing socket and the mDNS A record use this
+address, and it is baked into the device ID:
+```sh
+docker compose logs | grep "starting DANTE device"
+# Expected: starting DANTE device: Kitchen dante_ip=10.0.1.20 (INFERNO_BIND_IP=enp1s0) device_id=00000a0114000001 ...
+```
+If `dante_ip` is a link-local (`169.254.x.x`), loopback, or docker-bridge
+address, Dante Controller will never see the device. Set `INFERNO_BIND_IP` to
+your DANTE-facing interface name or IPv4 address.
 
 **Check Statime is synced** (look for "Slave" state — means it found the DANTE PTP master):
 ```sh
@@ -420,7 +431,10 @@ During PTP clock warmup, the buffer line shows:
 | `rejecting stream: sample rate` | Source not at 48kHz | Configure source for 48kHz output |
 | `connection failed ... retrying` | Sendspin server not reachable | Check URL, ensure Music Assistant is running |
 | `session ended with error ... reconnecting` | Sendspin server restarted or network glitch | Normal — bridge auto-reconnects in 2 seconds |
+| Bridge not appearing in Dante Controller or `netaudio`, and startup logs `dante_ip=169.254.x.x` | Auto-detection picked the wrong interface — mDNS is only answered on that interface and advertises an unreachable A record | Set `INFERNO_BIND_IP` to your DANTE-facing interface name or IPv4 address (add-on: `dante_bind`) |
 | Bridge devices not appearing in `netaudio` | mDNS not reaching the network | Ensure host networking mode, check firewall for UDP 5353 |
+| Bridge not appearing, but another DANTE device has the same name | mDNS hostname collision — the bridge name becomes the DANTE hostname | Give the bridge a unique `--name` |
+| `interface 'x' does not exist in this container` from statime | `PTP_INTERFACE` points at a NIC the container cannot see | Set `PTP_INTERFACE` to a listed interface and confirm host networking |
 | Multiple bridges failing at startup | TMPDIR collision or missing PROCESS_ID/ALT_PORT | Ensure each bridge has unique TMPDIR subdir, PROCESS_ID, and ALT_PORT |
 
 ## Further Documentation

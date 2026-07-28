@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **Startup logs now show which network interface the bridge bound to.** The
+  `starting DANTE device:` line carries `dante_ip=`, whether it came from
+  `dante_bind`/`INFERNO_BIND_IP` or auto-detection, and the derived
+  `device_id=`. Binding a link-local (`169.254.x.x`) or loopback address now
+  logs a warning: every DANTE socket and the mDNS A record use that address, so
+  picking the wrong one makes the bridge silently invisible in Dante Controller
+  with nothing in the log to explain it.
+
+### Changed
+- `dante_bind: auto` now resolves to the default-route interface — the same
+  heuristic the statime add-on uses for `ptp_interface`, so both land on the
+  same NIC — instead of falling through to inferno's own auto-detection, which
+  can pick a docker bridge or a link-local address.
+
 ## sha-558febf — 2026-07-28
 
 ### Added
