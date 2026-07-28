@@ -8,6 +8,7 @@
 ##
 ## Usage:
 ##   1. export PTP_INTERFACE=enp1s0  (your DANTE-facing NIC)
+##      Set INFERNO_BIND_IP to the same NIC in the bridge env below
 ##   2. Uncomment and edit bridge services below
 ##   3. docker compose up -d
 ##
@@ -29,6 +30,16 @@ x-bridge: &bridge
     - inferno-state:/root/.local/state/inferno_aoip  # persistent device state
   environment: &bridge-env
     INFERNO_CLOCK_PATH: /shared/usrvclock
+    # INFERNO_BIND_IP — the DANTE-facing interface name or IPv4 address.
+    # Strongly recommended on any host with more than one interface (including
+    # docker/podman/k8s bridges). Left unset, inferno_aoip auto-detects, and can
+    # land on a docker bridge or a link-local (169.254.x.x) address; the device
+    # then publishes an unreachable A record over mDNS, binds its ARC/CMC ports
+    # to that address, and never appears in Dante Controller. Use the same
+    # interface as PTP_INTERFACE. The bridge logs the address it picked
+    # (`dante_ip=...`) at startup and warns when it looks unusable.
+    # Must be a real value if set — an empty string is a configuration error.
+    # INFERNO_BIND_IP: enp1s0
     # TMPDIR must be on the shared path so Statime can reach usrvclock
     # client sockets. Each bridge MUST have its own unique subdirectory
     # to avoid socket name collisions (PIDs overlap across containers).
@@ -50,7 +61,10 @@ services:
     volumes:
       - ${SPIN2DANTE_SHARED:-/tmp/spin2dante}:/shared
     environment:
-      PTP_INTERFACE: ${PTP_INTERFACE:-eth0}
+      # Leave unset to auto-detect the default-route interface. The old `eth0`
+      # fallback silently pointed PTP at a nonexistent or wrong NIC on hosts
+      # using predictable interface names (enp1s0, eno1, ...).
+      PTP_INTERFACE: ${PTP_INTERFACE:-}
     restart: unless-stopped
     ## Hardware timestamping (optional, more accurate):
     ##   1. Verify your NIC supports it: ethtool -T <interface>
@@ -69,6 +83,8 @@ services:
   ##   - Unique TMPDIR subdirectory (e.g., /shared/tmp_kitchen)
   ##   - Unique PROCESS_ID (0-65535)
   ##   - Unique ALT_PORT (base port, spaced 10 apart)
+  ##   - A unique --name (it becomes the mDNS hostname; a collision with an
+  ##     existing DANTE device hides one of them from Dante Controller)
   ##   - DEVICE_ID is auto-derived from IP + PROCESS_ID
 
   # bridge-kitchen:
@@ -79,6 +95,7 @@ services:
   #     TMPDIR: /shared/tmp_kitchen
   #     INFERNO_PROCESS_ID: "1"
   #     INFERNO_ALT_PORT: "14000"
+  #     INFERNO_BIND_IP: enp1s0   # DANTE-facing NIC; see note in x-bridge above
 
   # bridge-bedroom:
   #   <<: *bridge

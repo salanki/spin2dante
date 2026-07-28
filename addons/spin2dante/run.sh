@@ -28,8 +28,17 @@ export INFERNO_CLOCK_PATH="$CLOCK_PATH"
 export INFERNO_TX_CHANNELS="2"
 export INFERNO_RX_CHANNELS="0"
 
+# `auto` resolves to the default-route interface — the same heuristic the statime
+# add-on uses, so both land on the same NIC. Falling through to inferno's own
+# auto-detection instead can pick a docker bridge or a link-local address, which
+# makes the bridge invisible to Dante Controller.
 if [[ "$DANTE_BIND" == "auto" ]]; then
-    DANTE_BIND=""
+    DANTE_BIND="$(ip route show default | awk '{print $5}' | head -1)"
+    if [[ -n "$DANTE_BIND" ]]; then
+        bashio::log.info "dante_bind: auto → ${DANTE_BIND} (default-route interface)"
+    else
+        bashio::log.warning "dante_bind: auto, but no default route was found; leaving the interface to inferno auto-detection. If the bridge does not appear in Dante Controller, set 'dante_bind' to your DANTE-facing interface or IP."
+    fi
 fi
 
 declare -A IDS=()
@@ -117,7 +126,7 @@ trap 'bashio::log.info "Stopping bridge processes"; terminate_children; exit 0' 
 if [[ -n "$DANTE_BIND" ]]; then
     bashio::log.info "DANTE bind: $DANTE_BIND"
 else
-    bashio::log.info "DANTE bind: auto"
+    bashio::log.info "DANTE bind: inferno auto-detection"
 fi
 
 for ((i = 0; i < BRIDGE_COUNT; i++)); do

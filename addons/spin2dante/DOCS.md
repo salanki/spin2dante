@@ -96,15 +96,31 @@ the bridge. For more general deployments, especially when Sendspin is remote,
 
 ## DANTE Network Binding
 
-By default, Inferno chooses the host's default local IPv4 address for DANTE and
-mDNS traffic. If your DANTE devices are on a secondary NIC or VLAN without the
-default route, set `dante_bind` to that interface name or to the IPv4 address on
-that network.
+With `dante_bind: auto` (the default), the add-on binds DANTE and mDNS traffic to
+the default-route interface — the same one the statime add-on uses for PTP, so
+both land on the same NIC. If your DANTE devices are on a secondary NIC or VLAN
+without the default route, set `dante_bind` to that interface name or to the IPv4
+address on that network.
 
 Examples:
 - `dante_bind: eth1`
 - `dante_bind: eth1.20`
 - `dante_bind: 192.168.50.2`
+
+The address in use is logged at startup:
+
+```
+starting DANTE device: Kitchen dante_ip=10.0.1.20 (INFERNO_BIND_IP=eth0) device_id=00000a0114000001 ...
+```
+
+If `dante_ip` is a link-local (`169.254.x.x`) or loopback address, the bridge
+logs a warning and will not be visible in Dante Controller — the mDNS records are
+only answered on that interface and advertise an address controllers cannot
+reach. Set `dante_bind` explicitly in that case.
+
+Give each bridge a `name` that no other DANTE device on the network uses: the
+name becomes the device's mDNS hostname, and a collision hides one of the two
+devices from Dante Controller.
 
 ## Volume Control
 
@@ -201,9 +217,14 @@ timeline and can be compared.
 against the bridge's scheduler mapping. That mapping pairs the globally shared
 DANTE/PTP read clock with Sendspin server time, and applied corrections move
 the anchor, so the metric retains both anchor-placement error and correction
-effects. The configured prebuffer cancels from the result. Subtract
-simultaneous records from two bridges on the same stream to estimate electronic
-playout skew. At 48 kHz, 48 frames = 1 ms.
+effects. Subtract simultaneous records from two bridges on the same stream to
+estimate electronic playout skew. At 48 kHz, 48 frames = 1 ms.
+
+The metric excludes each bridge's own prebuffer, so it is directly comparable
+only between bridges configured with the same `buffer_ms`. `buffer_ms` is real
+playout delay (see Notes), and a difference in it does **not** appear in the
+subtraction — when comparing zones with different `buffer_ms`, subtract the
+configured buffer difference by hand as well.
 
 Do not infer current skew from process-lifetime inserted/dropped counters.
 
