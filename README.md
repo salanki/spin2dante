@@ -373,7 +373,7 @@ anchor_correction_frames=174 pending=0 stale_drops=0 trims=0/0 high_water=1 ...
 | `stream_start_us` | First Sendspin audio timestamp; compare only equal nonzero values |
 | `mode` | `scheduled` (anchor-based targeting active) or `sequential` (fallback) |
 | `drift_valid` | `1` once the three-sample drift filter has a current result |
-| `drift_since_anchor_frames` | Filtered scheduler-output error; subtract simultaneous records from two bridges for pairwise playout skew |
+| `drift_since_anchor_frames` | Filtered scheduler-output error; subtract simultaneous records from two bridges for pairwise playout skew (valid only when both use the same `buffer_ms` — the metric excludes each bridge's prebuffer) |
 | `drift_since_anchor_us` | The same per-anchor drift in microseconds |
 | `raw_drift_since_anchor_frames` | Latest unfiltered per-anchor drift |
 | `anchor_correction_frames` | Signed frame corrections applied to the current scheduler anchor |

@@ -201,9 +201,14 @@ timeline and can be compared.
 against the bridge's scheduler mapping. That mapping pairs the globally shared
 DANTE/PTP read clock with Sendspin server time, and applied corrections move
 the anchor, so the metric retains both anchor-placement error and correction
-effects. The configured prebuffer cancels from the result. Subtract
-simultaneous records from two bridges on the same stream to estimate electronic
-playout skew. At 48 kHz, 48 frames = 1 ms.
+effects. Subtract simultaneous records from two bridges on the same stream to
+estimate electronic playout skew. At 48 kHz, 48 frames = 1 ms.
+
+The metric excludes each bridge's own prebuffer, so it is directly comparable
+only between bridges configured with the same `buffer_ms`. `buffer_ms` is real
+playout delay (see Notes), and a difference in it does **not** appear in the
+subtraction — when comparing zones with different `buffer_ms`, subtract the
+configured buffer difference by hand as well.
 
 Do not infer current skew from process-lifetime inserted/dropped counters.
 

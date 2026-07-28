@@ -1,5 +1,5 @@
 name: "spin2dante"
-version: "sha-41619e9"
+version: "sha-558febf"
 slug: spin2dante
 description: >-
   Bit-perfect bridge of one or more Sendspin audio streams to Audinate DANTE channels.

@@ -1,15 +1,17 @@
 # Changelog
 
-## Unreleased
+## sha-558febf — 2026-07-28
 
-- Attribute `[sync]` and drift-schedule records with bridge and stream context,
-  expose filtered/raw scheduler-output drift and signed correction, and add an
-  offline analyzer for maximum/p95
-  inter-bridge skew and trend direction.
-- Preserve multi-bridge log history with a configurable 120-second default
-  INFO summary interval; retain five-second detail and cadence-only correction
-  adjustments at DEBUG while keeping correction transitions and faults
-  immediate.
+### Added
+- **Attributed sync diagnostics.** Every periodic `[sync]` record now identifies its source and its position on the shared timeline: `bridge_id`, `bridge_name`, `client_id`, a process-local `session` counter, and `stream_start_us` (the first Sendspin audio timestamp of that session). Alongside them are `drift_since_anchor_frames`/`_us`, `raw_drift_since_anchor_frames`, and `anchor_correction_frames` — the signed correction applied to the current scheduler anchor, which resets with the anchor rather than accumulating for the process lifetime. Drift-correction schedule records carry the same attribution.
+- `sync_log_interval_seconds` (default `120`, range `5`–`3600`): seconds between INFO-level per-bridge sync summaries.
+- **Offline sync-log analyzer.** `test/common/sync_log_analyzer.py` reports maximum/median/p95 pairwise skew, the bridge pair at the maximum, per-stream growing/stable/reconverging trend, fault-counter maxima, and `bridges_never_compared`. It only compares records sharing a nonzero `stream_start_us`, rejects records more than 10 seconds apart rather than treating them as simultaneous, and reports `null` rather than `0` when there is nothing comparable. It requires a checkout of the repository — it is not shipped in the App image.
+
+### Changed
+- **INFO sync/buffer summaries now default to every 120 seconds instead of every 5.** On a multi-bridge install the old cadence rotated the App's log history in minutes. Summaries are emitted on shared wall-clock slots so records from different bridge processes land close enough together to compare, and the cadence survives track changes and rebuffers. Five-second detail remains available at log level `debug`; `waiting for DANTE subscriber` is rate-limited the same way. Correction start/stop transitions stay immediate at INFO, cadence-only adjustments drop to DEBUG, and warnings and errors are never rate-limited.
+
+### Known limitations
+- `drift_since_anchor_frames` is directly comparable only between bridges configured with the **same `buffer_ms`**. The metric excludes each bridge's own prebuffer, so a `buffer_ms` difference — which is real playout delay, as noted in the documentation — does not show up in the difference. When comparing zones with different `buffer_ms`, subtract the configured buffer difference by hand.
 
 ## sha-41619e9 — 2026-07-27
 
