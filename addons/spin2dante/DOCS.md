@@ -3,6 +3,62 @@
 This add-on runs one or more `spin2dante` bridge processes and advertises each
 configured stream as its own DANTE transmitter on your local network.
 
+## Reference Deployment
+
+The add-on is used continuously in a residential whole-house audio deployment
+with approximately 20 independent stereo zones. Music Assistant, Statime, and
+spin2dante run as Home Assistant apps inside a Home Assistant OS virtual
+machine, with one bridge process per DANTE zone.
+
+The reference deployment uses UniFi network infrastructure and DANTE-capable
+amplifiers and receivers from Blaze Audio, Origin Acoustics, and Wisdom Audio.
+All bridges share the same Sendspin timeline and DANTE PTP clock. Grouped
+playback is used across multiple DANTE zones and has also been tested in mixed
+Sonos/DANTE groups.
+
+```text
+Home Assistant OS VM
+┌─────────────────────────────────────────────────┐
+│ Music Assistant                                 │
+│       │ Sendspin                                 │
+│       ▼                                          │
+│ spin2dante — one bridge process per DANTE zone  │
+│       │ DANTE + PTP via PCI-passthrough NIC      │
+└───────┼─────────────────────────────────────────┘
+        ▼
+Main-rack UniFi switch
+├── Wisdom amplifier — elected PTP grandmaster
+├── DANTE receivers on the main rack
+└── UniFi inter-switch trunks
+    ├── Downstream UniFi switch ── DANTE receivers
+    ├── Downstream UniFi switch ── DANTE receivers
+    └── Downstream UniFi switch ── additional zones
+```
+
+DANTE audio and PTP remain on one Layer-2 DANTE network across the inter-switch
+trunks. This validates operation with receivers behind multiple switches, but
+does not imply that arbitrary multicast, QoS, VLAN, or switch configurations
+will work without appropriate setup.
+
+The Home Assistant OS VM runs on Proxmox with vCPUs pinned 1:1 to isolated host
+CPUs and scheduled with `SCHED_FIFO`. It receives a dedicated Broadcom DANTE
+NIC through PCI passthrough, reducing host-scheduler and virtualized-network
+variability. These are characteristics of the validated deployment, not strict
+requirements for the add-on.
+
+The Wisdom amplifier supplies the hardware PTP grandmaster. The Home Assistant
+VM follows it through Statime. Although the NIC is passed through directly, it
+exposes no PTP hardware clock, so timestamping and transmit timing remain
+software-based. Every bridge in this deployment uses `dante_latency: 10`,
+providing reasonable packet-jitter and scheduling headroom for the VM-based
+transmitter. This adds a common latency floor; it is not a 10ms cross-zone
+synchronization error.
+
+This is an example of a validated real-hardware deployment, not a hardware or
+topology requirement. Controlled tests measured the initial anchor-mapping
+spread at 1-16 samples; long-running monitoring uses an operational pairwise
+skew target below 2ms.
+
 ## Requirements
 
 - A DANTE-capable receiver on the same L2 network
@@ -97,10 +153,12 @@ the bridge. For more general deployments, especially when Sendspin is remote,
 ## DANTE Network Binding
 
 With `dante_bind: auto` (the default), the add-on binds DANTE and mDNS traffic to
-the default-route interface — the same one the statime add-on uses for PTP, so
-both land on the same NIC. If your DANTE devices are on a secondary NIC or VLAN
+the default-route interface — the same heuristic the statime add-on uses when
+`ptp_interface: auto`. If your DANTE devices are on a secondary NIC or VLAN
 without the default route, set `dante_bind` to that interface name or to the IPv4
-address on that network.
+address on that network, and set statime's `ptp_interface` to the same interface
+name. If no default route exists, the bridge falls back to Inferno's address
+auto-detection; explicit configuration is recommended in that case.
 
 Examples:
 - `dante_bind: eth1`
@@ -110,13 +168,15 @@ Examples:
 The address in use is logged at startup:
 
 ```
-starting DANTE device: Kitchen dante_ip=10.0.1.20 (INFERNO_BIND_IP=eth0) device_id=00000a0114000001 ...
+starting DANTE device: Kitchen dante_ip=10.0.1.20 (INFERNO_BIND_IP=eth0) device_id=00000a0001140001 ...
 ```
 
 If `dante_ip` is a link-local (`169.254.x.x`) or loopback address, the bridge
-logs a warning and will not be visible in Dante Controller — the mDNS records are
-only answered on that interface and advertise an address controllers cannot
-reach. Set `dante_bind` explicitly in that case.
+logs a warning because it may have selected the wrong interface. Link-local
+addresses are valid when your DANTE devices and controller use that link.
+If the address is outside your DANTE network, set `dante_bind` explicitly:
+the mDNS records are only answered on the selected interface and advertise
+that address.
 
 Give each bridge a `name` that no other DANTE device on the network uses: the
 name becomes the device's mDNS hostname, and a collision hides one of the two
@@ -138,40 +198,6 @@ The volume slider uses a linear-in-dB (audio) taper: every step changes
 loudness by the same 0.4 dB, with 100% = full (bit-perfect) level, 75% ≈
 −10 dB, 50% ≈ −20 dB, and a smooth fade to true silence below 10%. This
 makes the whole slider range useful — not just the bottom half.
-
-### Converting volumes from older versions
-
-Versions up to `sha-9b05ab9` used a different curve (`(volume/100)^1.5`)
-where most of the audible range was crammed into 0–50%. With the new taper
-a given volume % is quieter than before (50% went from −9 dB to −20 dB).
-
-If you have **presets, automations, scenes, or scripts that set player
-volume**, convert stored values to keep the same loudness:
-
-`new = 100 − 75 × log10(100 / old)` (for old ≥ 7; round to nearest)
-
-For old volumes below 7 (rare — these were barely audible on the old
-curve), the converted value lands in the fade-to-silence region below the
-new taper's 10% knee, so use this formula instead:
-
-`new = 631 × (old / 100)^1.5` (for old < 7; round to nearest)
-
-Both formulas agree at the crossover (old ≈ 6.3 → new = 10), and the
-table below already uses the correct branch for every row.
-
-| Old | New | Old | New |
-|----:|----:|----:|----:|
-| 100 | 100 | 40 | 70 |
-| 90 | 97 | 30 | 61 |
-| 80 | 93 | 25 | 55 |
-| 75 | 91 | 20 | 48 |
-| 70 | 88 | 15 | 38 |
-| 60 | 83 | 10 | 25 |
-| 50 | 77 | 5 | 7 |
-
-The saved per-bridge volume state restored at startup is also affected the
-same way: the number is kept, so the zone will sound quieter until you
-nudge the slider up per the table.
 
 When set to `none` (the default), the bridge is a transparent passthrough with
 no volume capability advertised. This is the right choice when volume is
@@ -217,14 +243,20 @@ timeline and can be compared.
 against the bridge's scheduler mapping. That mapping pairs the globally shared
 DANTE/PTP read clock with Sendspin server time, and applied corrections move
 the anchor, so the metric retains both anchor-placement error and correction
-effects. Subtract simultaneous records from two bridges on the same stream to
-estimate electronic playout skew. At 48 kHz, 48 frames = 1 ms.
+effects. It is the input to the correction loop, and a healthy bridge holds it
+near zero.
 
-The metric excludes each bridge's own prebuffer, so it is directly comparable
-only between bridges configured with the same `buffer_ms`. `buffer_ms` is real
-playout delay (see Notes), and a difference in it does **not** appear in the
-subtraction — when comparing zones with different `buffer_ms`, subtract the
-configured buffer difference by hand as well.
+**`playout_offset_frames` is the number to compare between zones.** It is
+`drift_since_anchor_frames` minus that bridge's own prebuffer (`buffer_ms`,
+also logged as `prebuffer_frames`), which makes it the signed position of the
+audio at the DANTE read head on the shared Sendspin timeline. A healthy bridge
+sits at roughly `-prebuffer_frames`. Subtract simultaneous records from two
+bridges on the same stream to get their electronic playout skew. At 48 kHz,
+48 frames = 1 ms.
+
+Use the offset rather than the drift because `buffer_ms` is real playout delay
+(see Notes): two zones at `5` and `55` genuinely play 50 ms apart, and only the
+offset shows that — both report drift near zero.
 
 Do not infer current skew from process-lifetime inserted/dropped counters.
 
@@ -232,7 +264,8 @@ Example:
 
 ```text
 [sync] bridge_id=livingroom bridge_name="Living Room" ... session=1 \
-stream_start_us=1842000000 drift_valid=1 drift_since_anchor_frames=-72 \
+stream_start_us=1842000000 drift_valid=1 playout_offset_frames=-312 \
+playout_offset_us=-6500 prebuffer_frames=240 drift_since_anchor_frames=-72 \
 drift_since_anchor_us=-1500 \
 raw_drift_since_anchor_frames=-65 anchor_correction_frames=174 ...
 ```

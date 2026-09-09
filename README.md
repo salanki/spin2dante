@@ -9,7 +9,7 @@
 > **Note**
 > This project is experimental. It has been validated with real DANTE hardware
 > running as a Home Assistant add-on, and with Music Assistant grouped playback
-> across Sonos and DANTE players — the two stay in perfect audible sync.
+> across Sonos and DANTE players — the tested setup remained audibly synchronized.
 > Use at your own risk.
 
 Bridge [Sendspin](https://www.sendspin-audio.com/) audio streams to [DANTE](https://www.getdante.com/) network audio receivers.
@@ -34,9 +34,65 @@ DANTE Receivers (amplifiers, receivers, etc.)
 ### Key capabilities
 
 - **Unlimited zones** — run one bridge per zone, each appears as a separate DANTE transmitter and Music Assistant player. Tested with up to 16 simultaneous stereo pairs.
-- **Sub-millisecond cross-bridge sync** — bridges sharing the same PTP clock and Sendspin server synchronize to within 1-16 samples (0.02-0.33ms). Group playback across zones stays in tight sync without inter-bridge communication.
-- **Cross-ecosystem sync with Sonos** — validated with Music Assistant grouped playback spanning Sonos and DANTE players simultaneously; the two ecosystems stay in perfect audible sync.
+- **Tight cross-bridge sync** — controlled tests measured the initial anchor-mapping spread at 1-16 samples (0.02-0.33ms). During long-running playback, independent drift-correction schedules can temporarily increase pairwise skew; the operational target is under 2ms.
+- **Cross-ecosystem sync with Sonos** — validated with Music Assistant grouped playback spanning Sonos and DANTE players simultaneously; the tested setup remained audibly synchronized.
 - **Measured PCM integrity** — the E2E harness captures DANTE output, aligns it against a deterministic reference, verifies sample-level exact runs and match ratio, and attributes any declared single-frame timing corrections separately from corruption.
+
+### Reference production deployment
+
+spin2dante is used continuously in a residential whole-house audio system with
+approximately 20 independent stereo zones. Music Assistant, Statime, and
+spin2dante run as Home Assistant apps inside a Home Assistant OS virtual
+machine, with one spin2dante bridge process per DANTE zone.
+
+The deployment uses UniFi network infrastructure and feeds DANTE-capable
+amplifiers and receivers from Blaze Audio, Origin Acoustics, and Wisdom Audio.
+All bridges share the same Sendspin timeline and DANTE PTP clock. Grouped
+playback is used across multiple DANTE zones and has also been tested in mixed
+Sonos/DANTE groups.
+
+```text
+Home Assistant OS VM
+┌─────────────────────────────────────────────────┐
+│ Music Assistant                                 │
+│       │ Sendspin                                 │
+│       ▼                                          │
+│ spin2dante — one bridge process per DANTE zone  │
+│       │ DANTE + PTP via PCI-passthrough NIC      │
+└───────┼─────────────────────────────────────────┘
+        ▼
+Main-rack UniFi switch
+├── Wisdom amplifier — elected PTP grandmaster
+├── DANTE receivers on the main rack
+└── UniFi inter-switch trunks
+    ├── Downstream UniFi switch ── DANTE receivers
+    ├── Downstream UniFi switch ── DANTE receivers
+    └── Downstream UniFi switch ── additional zones
+```
+
+DANTE audio and PTP remain on one Layer-2 DANTE network across the inter-switch
+trunks. This validates operation with receivers behind multiple switches, but
+does not imply that arbitrary multicast, QoS, VLAN, or switch configurations
+will work without appropriate setup.
+
+The Home Assistant OS VM runs on Proxmox with vCPUs pinned 1:1 to isolated host
+CPUs and scheduled with `SCHED_FIFO`. It receives a dedicated Broadcom DANTE
+NIC through PCI passthrough, reducing host-scheduler and virtualized-network
+variability. These are characteristics of the validated deployment, not strict
+requirements for spin2dante.
+
+The Wisdom amplifier supplies the hardware PTP grandmaster. The Home Assistant
+VM follows it through Statime. Although the NIC is passed through directly, it
+exposes no PTP hardware clock, so timestamping and transmit timing remain
+software-based. Every bridge in this deployment uses `dante_latency=10ms`,
+providing reasonable packet-jitter and scheduling headroom for the VM-based
+transmitter. This adds a common latency floor; it is not a 10ms cross-zone
+synchronization error.
+
+This deployment provides real-hardware operational validation, not a universal
+performance guarantee. Controlled tests measured the initial anchor-mapping
+spread at 1-16 samples; long-running monitoring uses an operational pairwise
+skew target below 2ms.
 
 ## Deployment Options
 
@@ -191,25 +247,6 @@ Volume changes use a 20ms per-frame ramp to prevent audible clicks.
 
 **Volume taper.** The 0–100 volume maps to gain with a linear-in-dB (audio) taper: `dB = 40 × (volume/100 − 1)`, i.e. a constant 0.4 dB per 1% step, anchored at −40 dB, with unity (0 dBFS) at 100%. So 75% ≈ −10 dB, 50% ≈ −20 dB, 25% ≈ −30 dB. Below 10% the gain fades linearly to true silence at 0% (dropping past −40 dB, ≈−56 dB at 1%), avoiding an audible cliff between 1% and mute. This gives each step of the slider a roughly equal loudness change across the whole travel — unlike a linear-amplitude mapping, where everything audible happens below 50%.
 
-**Migrating volumes from versions with the old `^1.5` curve.** Earlier versions used sendspin's `gain = (volume/100)^1.5` curve. A given volume % is now quieter (50% went from −9 dB to −20 dB). To keep the same loudness, convert stored volumes (presets, automations, scenes) with:
-
-```
-new = 100 − 75 × log10(100 / old)      (old ≥ 7; round to nearest)
-new = 631 × (old / 100)^1.5            (old < 7; round to nearest)
-```
-
-Why two formulas: the first inverts the taper's dB line, which only covers new volumes from 10% up. Old volumes below ~7 convert to values inside the fade-to-silence region below the 10% knee, where the second formula (inverting the fade) applies. Both agree at the crossover (old ≈ 6.3 → new = 10).
-
-| Old | New | Old | New |
-|----:|----:|----:|----:|
-| 100 | 100 | 40 | 70 |
-| 90 | 97 | 30 | 61 |
-| 80 | 93 | 25 | 55 |
-| 75 | 91 | 20 | 48 |
-| 70 | 88 | 15 | 38 |
-| 60 | 83 | 10 | 25 |
-| 50 | 77 | 5 | 7 |
-
 ### Environment Variables
 
 These are passed through to [inferno_aoip](https://gitlab.com/lumifaza/inferno):
@@ -274,16 +311,18 @@ Since Docker containers have isolated filesystems (even with host networking), t
 
 ### Verifying the Deployment
 
-**Check each bridge bound to the right interface** — this is the most common
-deployment fault. Every DANTE-facing socket and the mDNS A record use this
+**Check each bridge bound to the right interface.** Every DANTE-facing socket
+and the mDNS A record use this
 address, and it is baked into the device ID:
 ```sh
 docker compose logs | grep "starting DANTE device"
-# Expected: starting DANTE device: Kitchen dante_ip=10.0.1.20 (INFERNO_BIND_IP=enp1s0) device_id=00000a0114000001 ...
+# Expected: starting DANTE device: Kitchen dante_ip=10.0.1.20 (INFERNO_BIND_IP=enp1s0) device_id=00000a0001140001 ...
 ```
-If `dante_ip` is a link-local (`169.254.x.x`), loopback, or docker-bridge
-address, Dante Controller will never see the device. Set `INFERNO_BIND_IP` to
-your DANTE-facing interface name or IPv4 address.
+If `dante_ip` is outside your DANTE network (for example, a loopback or
+docker-bridge address), Dante Controller may not discover or reach the device.
+Link-local (`169.254.x.x`) addresses are valid when your DANTE devices and
+controller use that link. Otherwise, set `INFERNO_BIND_IP` to your DANTE-facing
+interface name or IPv4 address, and configure `PTP_INTERFACE` for the same NIC.
 
 **Check Statime is synced** (look for "Slave" state — means it found the DANTE PTP master):
 ```sh
@@ -372,6 +411,7 @@ events are immediate.
 ```
 [sync] bridge_id=kitchen bridge_name="Kitchen" client_id=... session=1 \
 stream_start_us=1842000000 mode=scheduled drift_valid=1 \
+playout_offset_frames=-312 playout_offset_us=-6500 prebuffer_frames=240 \
 drift_since_anchor_frames=-72 \
 drift_since_anchor_us=-1500 raw_drift_since_anchor_frames=-65 \
 anchor_correction_frames=174 pending=0 stale_drops=0 trims=0/0 high_water=1 ...
@@ -384,7 +424,9 @@ anchor_correction_frames=174 pending=0 stale_drops=0 trims=0/0 high_water=1 ...
 | `stream_start_us` | First Sendspin audio timestamp; compare only equal nonzero values |
 | `mode` | `scheduled` (anchor-based targeting active) or `sequential` (fallback) |
 | `drift_valid` | `1` once the three-sample drift filter has a current result |
-| `drift_since_anchor_frames` | Filtered scheduler-output error; subtract simultaneous records from two bridges for pairwise playout skew (valid only when both use the same `buffer_ms` — the metric excludes each bridge's prebuffer) |
+| `playout_offset_frames` / `_us` | Signed position of the audio at the read head on the shared Sendspin timeline (`drift_since_anchor` minus `prebuffer_frames`); ≈ `-prebuffer_frames` when healthy. **Subtract simultaneous records from two bridges for pairwise playout skew.** |
+| `prebuffer_frames` | This bridge's `buffer_ms` in frames |
+| `drift_since_anchor_frames` | Filtered scheduler-output error, the correction loop's input; held near zero. Blind to `buffer_ms` differences, so do not use it for cross-bridge skew |
 | `drift_since_anchor_us` | The same per-anchor drift in microseconds |
 | `raw_drift_since_anchor_frames` | Latest unfiltered per-anchor drift |
 | `anchor_correction_frames` | Signed frame corrections applied to the current scheduler anchor |
@@ -431,7 +473,7 @@ During PTP clock warmup, the buffer line shows:
 | `rejecting stream: sample rate` | Source not at 48kHz | Configure source for 48kHz output |
 | `connection failed ... retrying` | Sendspin server not reachable | Check URL, ensure Music Assistant is running |
 | `session ended with error ... reconnecting` | Sendspin server restarted or network glitch | Normal — bridge auto-reconnects in 2 seconds |
-| Bridge not appearing in Dante Controller or `netaudio`, and startup logs `dante_ip=169.254.x.x` | Auto-detection picked the wrong interface — mDNS is only answered on that interface and advertises an unreachable A record | Set `INFERNO_BIND_IP` to your DANTE-facing interface name or IPv4 address (add-on: `dante_bind`) |
+| Bridge not appearing in Dante Controller or `netaudio`, and startup logs an address outside your DANTE network | Auto-detection may have picked the wrong interface — mDNS is only answered on that interface and advertises its address | Set `INFERNO_BIND_IP` to your DANTE-facing interface name or IPv4 address (add-on: `dante_bind`), with PTP on the same NIC; link-local addresses are valid on link-local DANTE networks |
 | Bridge devices not appearing in `netaudio` | mDNS not reaching the network | Ensure host networking mode, check firewall for UDP 5353 |
 | Bridge not appearing, but another DANTE device has the same name | mDNS hostname collision — the bridge name becomes the DANTE hostname | Give the bridge a unique `--name` |
 | `interface 'x' does not exist in this container` from statime | `PTP_INTERFACE` points at a NIC the container cannot see | Set `PTP_INTERFACE` to a listed interface and confirm host networking |
