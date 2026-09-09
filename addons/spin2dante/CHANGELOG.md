@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## sha-9924688 — 2026-09-08
 
 ### Added
 - **Startup logs now show which network interface the bridge bound to.** The
