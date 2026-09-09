@@ -30,8 +30,8 @@ export INFERNO_RX_CHANNELS="0"
 
 # `auto` resolves to the default-route interface — the same heuristic the statime
 # add-on uses, so both land on the same NIC. Falling through to inferno's own
-# auto-detection instead can pick a docker bridge or a link-local address, which
-# makes the bridge invisible to Dante Controller.
+# auto-detection instead can pick an address outside the DANTE network, which
+# can make the bridge invisible to Dante Controller.
 if [[ "$DANTE_BIND" == "auto" ]]; then
     DANTE_BIND="$(ip route show default | awk '{print $5}' | head -1)"
     if [[ -n "$DANTE_BIND" ]]; then

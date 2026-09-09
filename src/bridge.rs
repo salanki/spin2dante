@@ -464,7 +464,7 @@ impl SendspinBridge {
         // Log the address inferno_aoip actually bound to. Everything DANTE-facing
         // hangs off it: the mDNS responder only answers on that interface and
         // publishes it as the A record, the ARC/CMC/flows sockets bind to it, and
-        // the factory device ID embeds it (bytes 2..6). If auto-detection picks a
+        // the factory device ID embeds it (bytes 2..6). If auto-detection picks an
         // address outside the DANTE network, the controller may not see the device —
         // and without this line the only trace is the state directory name.
         let dante_ip = settings.self_info.ip_address;
